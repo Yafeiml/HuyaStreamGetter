@@ -24,31 +24,25 @@ jobs:
         include:
           - os: windows-latest
             target: win-x64
-            archive_format: zip
           - os: windows-latest
             target: win-arm64
-            archive_format: zip
           - os: ubuntu-latest
             target: linux-x64
-            archive_format: tar.gz
           - os: ubuntu-latest
             target: linux-arm64
-            archive_format: tar.gz
           - os: macos-latest
             target: osx-x64
-            archive_format: tar.gz
           - os: macos-latest
             target: osx-arm64
-            archive_format: tar.gz
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET 10
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '8.0.x'
 
       - name: Determine Version
         id: get_version
@@ -69,38 +63,38 @@ jobs:
             -p:IncludeNativeLibrariesForSelfExtract=true \
             -p:DebugType=None \
             -p:DebugSymbols=false \
-            -o ./out/${{ matrix.target }}
+            -o ./out
 
-      - name: Package Artifacts
+      - name: Prepare Package Files
         shell: bash
         run: |
           mkdir -p ./package
-          cd ./out/${{ matrix.target }}
-          
-          # Copy template configuration & documentation
-          cp ../../config.example.json ./config.example.json
-          cp ../../config.example.json ./config.json 2>/dev/null || true
-          cp ../../README.md ./README.md
-          cp ../../LICENSE ./LICENSE
-          
-          PKG_NAME="HuyaStreamGetter-${{ steps.get_version.outputs.VERSION }}-${{ matrix.target }}"
-          
-          if [ "${{ matrix.archive_format }}" = "zip" ]; then
-            if command -v 7z &> /dev/null; then
-              7z a "../../package/${PKG_NAME}.zip" *
-            elif command -v zip &> /dev/null; then
-              zip -r "../../package/${PKG_NAME}.zip" *
-            else
-              powershell -Command "Compress-Archive -Path * -DestinationPath ../../package/${PKG_NAME}.zip"
-            fi
-          else
-            tar -czvf "../../package/${PKG_NAME}.tar.gz" *
-          fi
+          cp config.example.json ./out/config.example.json
+          cp config.example.json ./out/config.json || true
+          cp README.md ./out/README.md
+          cp LICENSE ./out/LICENSE
+
+      - name: Archive on Windows (.zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.get_version.outputs.VERSION }}"
+          $target = "${{ matrix.target }}"
+          $zipName = "HuyaStreamGetter-$ver-$target.zip"
+          Compress-Archive -Path ./out/* -DestinationPath ./package/$zipName
+
+      - name: Archive on Linux/macOS (.tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ver="${{ steps.get_version.outputs.VERSION }}"
+          target="${{ matrix.target }}"
+          tar -czvf ./package/HuyaStreamGetter-${ver}-${target}.tar.gz -C ./out .
 
       - name: Upload Package as Action Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: package-${{ matrix.target }}
           path: ./package/*
           retention-days: 1
 
@@ -126,6 +120,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./release-assets
+          pattern: package-*
           merge-multiple: true
 
       - name: Create or Update GitHub Release
