@@ -24,3 +24,5 @@ config.json
 .DS_Store
 Thumbs.db
 *.bak
+build_release.bat
+build_release.ps1
