@@ -7,33 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag Name (e.g. v1.0.0)'
+        description: 'Release Tag Name (e.g. v1.0.1)'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.0.1'
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: win-x64
-          - os: windows-latest
-            target: win-arm64
-          - os: ubuntu-latest
-            target: linux-x64
-          - os: ubuntu-latest
-            target: linux-arm64
-          - os: macos-latest
-            target: osx-x64
-          - os: macos-latest
-            target: osx-arm64
+    name: Build Windows x64 Release
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -55,80 +39,29 @@ jobs:
           fi
 
       - name: Publish Single-File Executable
-        shell: bash
-        run: |
-          dotnet publish HuyaStreamGetter.csproj -c Release -r ${{ matrix.target }} \
-            --self-contained true \
-            -p:PublishSingleFile=true \
-            -p:IncludeNativeLibrariesForSelfExtract=true \
-            -p:DebugType=None \
-            -p:DebugSymbols=false \
-            -o ./out
-
-      - name: Prepare Package Files
-        shell: bash
-        run: |
-          mkdir -p ./package
-          cp config.example.json ./out/config.example.json
-          cp config.example.json ./out/config.json || true
-          cp README.md ./out/README.md
-          cp LICENSE ./out/LICENSE
-
-      - name: Archive on Windows (.zip)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          dotnet publish HuyaStreamGetter.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o ./out
+
+      - name: Package Windows Artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ./package | Out-Null
+          Copy-Item config.example.json -Destination ./out/config.example.json -Force
+          Copy-Item config.example.json -Destination ./out/config.json -Force
+          Copy-Item README.md -Destination ./out/README.md -Force
+          Copy-Item LICENSE -Destination ./out/LICENSE -Force
+          
           $ver = "${{ steps.get_version.outputs.VERSION }}"
-          $target = "${{ matrix.target }}"
-          $zipName = "HuyaStreamGetter-$ver-$target.zip"
-          Compress-Archive -Path ./out/* -DestinationPath ./package/$zipName
-
-      - name: Archive on Linux/macOS (.tar.gz)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          ver="${{ steps.get_version.outputs.VERSION }}"
-          target="${{ matrix.target }}"
-          tar -czvf ./package/HuyaStreamGetter-${ver}-${target}.tar.gz -C ./out .
-
-      - name: Upload Package as Action Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-${{ matrix.target }}
-          path: ./package/*
-          retention-days: 1
-
-  release:
-    name: Create GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Determine Version
-        id: get_version
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./release-assets
-          pattern: package-*
-          merge-multiple: true
+          $zipPath = "./package/HuyaStreamGetter-$ver-win-x64.zip"
+          Compress-Archive -Path ./out/* -DestinationPath $zipPath -Force
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
           name: Release ${{ steps.get_version.outputs.VERSION }}
-          files: ./release-assets/*
+          files: ./package/*
           draft: false
           prerelease: false
           generate_release_notes: true
