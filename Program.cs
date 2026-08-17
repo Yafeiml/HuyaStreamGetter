@@ -294,6 +294,20 @@ static async Task<bool> LoadConfigAsync()
     string configPath = Path.Combine(AppContext.BaseDirectory, Globals.CONFIG_FILE_NAME);
     if (!File.Exists(configPath))
     {
+        string examplePath = Path.Combine(AppContext.BaseDirectory, "config.example.json");
+        if (File.Exists(examplePath))
+        {
+            try
+            {
+                File.Copy(examplePath, configPath);
+                Console.WriteLine($"已为您自动从模板创建 {Globals.CONFIG_FILE_NAME}，请根据需要修改配置。");
+            }
+            catch { }
+        }
+    }
+
+    if (!File.Exists(configPath))
+    {
         Console.WriteLine($"错误：未在程序目录中找到 {Globals.CONFIG_FILE_NAME}！");
         return false;
     }

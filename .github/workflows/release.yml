@@ -1,0 +1,139 @@
+name: Release Build & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag Name (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: win-x64
+            archive_format: zip
+          - os: windows-latest
+            target: win-arm64
+            archive_format: zip
+          - os: ubuntu-latest
+            target: linux-x64
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            target: linux-arm64
+            archive_format: tar.gz
+          - os: macos-latest
+            target: osx-x64
+            archive_format: tar.gz
+          - os: macos-latest
+            target: osx-arm64
+            archive_format: tar.gz
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine Version
+        id: get_version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish Single-File Executable
+        shell: bash
+        run: |
+          dotnet publish HuyaStreamGetter.csproj -c Release -r ${{ matrix.target }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o ./out/${{ matrix.target }}
+
+      - name: Package Artifacts
+        shell: bash
+        run: |
+          mkdir -p ./package
+          cd ./out/${{ matrix.target }}
+          
+          # Copy template configuration & documentation
+          cp ../../config.example.json ./config.example.json
+          cp ../../config.example.json ./config.json 2>/dev/null || true
+          cp ../../README.md ./README.md
+          cp ../../LICENSE ./LICENSE
+          
+          PKG_NAME="HuyaStreamGetter-${{ steps.get_version.outputs.VERSION }}-${{ matrix.target }}"
+          
+          if [ "${{ matrix.archive_format }}" = "zip" ]; then
+            if command -v 7z &> /dev/null; then
+              7z a "../../package/${PKG_NAME}.zip" *
+            elif command -v zip &> /dev/null; then
+              zip -r "../../package/${PKG_NAME}.zip" *
+            else
+              powershell -Command "Compress-Archive -Path * -DestinationPath ../../package/${PKG_NAME}.zip"
+            fi
+          else
+            tar -czvf "../../package/${PKG_NAME}.tar.gz" *
+          fi
+
+      - name: Upload Package as Action Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ./package/*
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Version
+        id: get_version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release-assets
+          merge-multiple: true
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          files: ./release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
