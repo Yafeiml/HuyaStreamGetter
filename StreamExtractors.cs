@@ -191,6 +191,8 @@ namespace HuyaStreamGetter
                     string path = url.Split(new[] { "douyu.com/" }, StringSplitOptions.None)[1].Split('?')[0].Split('/')[0];
                     var req = new HttpRequestMessage(HttpMethod.Get, $"https://m.douyu.com/{path}");
                     req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                    if (!string.IsNullOrEmpty(_cookies)) req.Headers.Add("Cookie", _cookies);
+                    
                     var res = await _httpClient.SendAsync(req);
                     var html = await res.Content.ReadAsStringAsync();
                     var m = Regex.Match(html, @"""rid"":(\d+)");
@@ -210,9 +212,12 @@ namespace HuyaStreamGetter
                     _ => "0"
                 };
 
-                // Get encryption params
+                // 1. 获取动态加密密钥 (带 Cookie 鉴权)
                 var encReq = new HttpRequestMessage(HttpMethod.Get, $"https://www.douyu.com/wgapi/livenc/liveweb/websec/getEncryption?did=10000000000000000000000000001501");
                 encReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                encReq.Headers.Add("Referer", $"https://www.douyu.com/{roomId}");
+                if (!string.IsNullOrEmpty(_cookies)) encReq.Headers.Add("Cookie", _cookies);
+                
                 var encRes = await _httpClient.SendAsync(encReq);
                 var encJson = JsonNode.Parse(await encRes.Content.ReadAsStringAsync());
                 
@@ -248,9 +253,12 @@ namespace HuyaStreamGetter
                     { "auth", auth }
                 };
 
+                // 2. 请求播放地址 (带全量 Cookie，解锁原画2K60/4K与最高码率)
                 var playReq = new HttpRequestMessage(HttpMethod.Post, $"https://playweb.douyucdn.cn/lapi/live/getH5PlayV1/{roomId}");
                 playReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
                 playReq.Headers.Add("Origin", "https://www.douyu.com");
+                playReq.Headers.Add("Referer", $"https://www.douyu.com/{roomId}");
+                if (!string.IsNullOrEmpty(_cookies)) playReq.Headers.Add("Cookie", _cookies);
                 playReq.Content = new FormUrlEncodedContent(paramDict);
 
                 var playRes = await _httpClient.SendAsync(playReq);
@@ -292,6 +300,7 @@ namespace HuyaStreamGetter
         private string? _sStreamName;
         private string? _sHlsUrlSuffix;
         private string? _sHlsAntiCode;
+        private string _ratioParam = "";
 
         private readonly long _uid;
         private readonly long _initUuid;
@@ -310,7 +319,7 @@ namespace HuyaStreamGetter
             if (string.IsNullOrEmpty(_sHlsUrl) || string.IsNullOrEmpty(_sStreamName))
                 return "";
             string newAntiCode = GetAntiCode(_sHlsAntiCode!, _sStreamName!);
-            return $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio=";
+            return $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio={_ratioParam}";
         }
 
         private Dictionary<string, string> ParseQueryString(string query)
@@ -353,19 +362,37 @@ namespace HuyaStreamGetter
         {
             try
             {
+                // 1. 码率参数映射
+                _ratioParam = quality switch
+                {
+                    "OD" => "",
+                    "BD" => "",
+                    "UHD" => "4000",
+                    "HD" => "2000",
+                    "SD" => "1000",
+                    _ => ""
+                };
+
+                // 2. 解析房间号 (支持别名转换)
                 string roomId = url.Split('?')[0].TrimEnd('/').Split('/').Last();
                 if (roomId.Any(char.IsLetter))
                 {
-                    var mReq = new HttpRequestMessage(HttpMethod.Get, url);
+                    var mReq = new HttpRequestMessage(HttpMethod.Get, url.StartsWith("http") ? url : $"https://m.huya.com/{roomId}");
                     mReq.Headers.Add("User-Agent", "ios/7.830 (ios 17.0; ; iPhone 15)");
+                    if (!string.IsNullOrEmpty(_cookies)) mReq.Headers.Add("Cookie", _cookies);
+                    
                     var mRes = await _httpClient.SendAsync(mReq);
                     var html = await mRes.Content.ReadAsStringAsync();
                     var match = Regex.Match(html, @"ProfileRoom"":(.*?),""sPrivateHost");
                     if (match.Success) roomId = match.Groups[1].Value;
                 }
 
+                // 3. 请求虎牙移动端 Profile 缓存接口 (带 Cookie)
                 var req = new HttpRequestMessage(HttpMethod.Get, $"https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid={roomId}&showSecret=1");
                 req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
+                req.Headers.Add("Referer", $"https://www.huya.com/{roomId}");
+                if (!string.IsNullOrEmpty(_cookies)) req.Headers.Add("Cookie", _cookies);
+                
                 var res = await _httpClient.SendAsync(req);
                 var json = JsonNode.Parse(await res.Content.ReadAsStringAsync());
 
@@ -375,9 +402,11 @@ namespace HuyaStreamGetter
                 string liveType = json?["data"]?["liveData"]?["gameHostName"]?.GetValue<string>() ?? "";
                 if (liveType == "lol")
                 {
-                    // LOL 分区走 PC 页面解析
+                    // LOL 分区优先走 PC 页面流解析
                     var pcReq = new HttpRequestMessage(HttpMethod.Get, $"https://www.huya.com/{roomId}");
                     pcReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
+                    if (!string.IsNullOrEmpty(_cookies)) pcReq.Headers.Add("Cookie", _cookies);
+                    
                     var pcRes = await _httpClient.SendAsync(pcReq);
                     var pcHtml = await pcRes.Content.ReadAsStringAsync();
                     var pcMatch = Regex.Match(pcHtml, @"stream: (\{""data"".*?),""iWebDefaultBitRate""");
@@ -393,24 +422,28 @@ namespace HuyaStreamGetter
                             _sHlsUrlSuffix = streamInfo["sHlsUrlSuffix"]?.GetValue<string>() ?? "m3u8";
                             _sHlsAntiCode = streamInfo["sHlsAntiCode"]?.GetValue<string>() ?? "";
                             string newAntiCode = GetAntiCode(_sHlsAntiCode, _sStreamName);
-                            return $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio=";
+                            return $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio={_ratioParam}";
                         }
                     }
                 }
 
+                // 4. 多 CDN 优先级优选 (TX > HW > AL > HS > 首选)
                 var baseSteamInfoList = json?["data"]?["stream"]?["baseSteamInfoList"]?.AsArray();
                 if (baseSteamInfoList != null && baseSteamInfoList.Count > 0)
                 {
-                    // 优先选 TX CDN
-                    var txItem = baseSteamInfoList.FirstOrDefault(x => x?["sCdnType"]?.GetValue<string>() == "TX") ?? baseSteamInfoList[0];
-                    if (txItem != null)
+                    var selectedItem = baseSteamInfoList.FirstOrDefault(x => x?["sCdnType"]?.GetValue<string>() == "TX")
+                                       ?? baseSteamInfoList.FirstOrDefault(x => x?["sCdnType"]?.GetValue<string>() == "HW")
+                                       ?? baseSteamInfoList.FirstOrDefault(x => x?["sCdnType"]?.GetValue<string>() == "AL")
+                                       ?? baseSteamInfoList[0];
+
+                    if (selectedItem != null)
                     {
-                        _sStreamName = txItem["sStreamName"]?.GetValue<string>() ?? "";
-                        _sHlsUrl = txItem["sHlsUrl"]?.GetValue<string>() ?? "";
-                        _sHlsUrlSuffix = txItem["sHlsUrlSuffix"]?.GetValue<string>() ?? "m3u8";
-                        _sHlsAntiCode = txItem["sHlsAntiCode"]?.GetValue<string>() ?? "";
+                        _sStreamName = selectedItem["sStreamName"]?.GetValue<string>() ?? "";
+                        _sHlsUrl = selectedItem["sHlsUrl"]?.GetValue<string>() ?? "";
+                        _sHlsUrlSuffix = selectedItem["sHlsUrlSuffix"]?.GetValue<string>() ?? "m3u8";
+                        _sHlsAntiCode = selectedItem["sHlsAntiCode"]?.GetValue<string>() ?? "";
                         string newAntiCode = GetAntiCode(_sHlsAntiCode, _sStreamName);
-                        string m3u8Url = $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio=";
+                        string m3u8Url = $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio={_ratioParam}";
                         return m3u8Url;
                     }
                 }
