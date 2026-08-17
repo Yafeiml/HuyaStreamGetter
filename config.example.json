@@ -1,0 +1,27 @@
+{
+  "CookieProfiles": {
+    "huya_main": "（可选：在此粘贴虎牙网页版 Cookie，可观看原画或高码率流）",
+    "douyu_main": "（可选：在此粘贴斗鱼 Cookie）",
+    "bilibili_main": "（可选：在此粘贴 B站 Cookie）"
+  },
+  "Channels": [
+    {
+      "Id": "huya_example_1",
+      "Name": "虎牙-示例频道1",
+      "Platform": "huya",
+      "Url": "https://www.huya.com/eslcs",
+      "Quality": "OD",
+      "CookieProfileKey": "huya_main",
+      "Enable": true
+    },
+    {
+      "Id": "huya_example_2",
+      "Name": "虎牙-示例频道2",
+      "Platform": "huya",
+      "Url": "https://www.huya.com/660004",
+      "Quality": "OD",
+      "CookieProfileKey": "huya_main",
+      "Enable": false
+    }
+  ]
+}

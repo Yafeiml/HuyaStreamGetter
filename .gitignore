@@ -1,0 +1,25 @@
+## Visual Studio / Build Artifacts
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Runtime Generated Files
+hls_stream/
+*.log
+ffmpeg.exe
+ffmpeg
+ffprobe.exe
+ffprobe
+
+## Configuration with Sensitive Cookies / Tokens
+config.json
+!config.example.json
+
+## Temporary / OS Files
+.DS_Store
+Thumbs.db
+*.bak
