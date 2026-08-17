@@ -46,6 +46,10 @@ builder.Services.AddHostedService<StreamManagerService>();
 
 var app = builder.Build();
 
+// Enable default files (index.html) and static files from wwwroot (Web UI)
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 // Ensure HLS directory exists for static files provider
 if (!Directory.Exists(Globals.HLS_FULL_PATH))
 {
@@ -76,15 +80,244 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 
+// -------------------------------------------------------------
+// RESTful Management APIs
+// -------------------------------------------------------------
+
+// 1. 获取全局系统状态与频道状态大盘
+app.MapGet("/api/status", () =>
+{
+    var uptime = DateTime.UtcNow - Globals.StartTimeUtc;
+    var channelStatusList = new List<object>();
+
+    lock (Globals.StatusLock)
+    {
+        foreach (var channel in Globals.Config.Channels)
+        {
+            var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channel.Id);
+            string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channel.Id, "stream.m3u8");
+            bool isStreaming = File.Exists(m3u8Path) && channel.Enable && 
+                (DateTime.Now - File.GetLastWriteTime(m3u8Path)).TotalSeconds <= 90;
+
+            channelStatusList.Add(new
+            {
+                id = channel.Id,
+                name = channel.Name,
+                platform = channel.Platform,
+                url = channel.Url,
+                quality = string.IsNullOrEmpty(channel.Quality) ? "OD" : channel.Quality,
+                cookieProfileKey = channel.CookieProfileKey ?? "",
+                enable = channel.Enable,
+                statusMessage = status?.Message ?? "未知",
+                color = status?.Color.ToString() ?? "Gray",
+                retryCount = status?.RetryCount ?? 0,
+                isLive = isStreaming,
+                hlsUrl = $"/live/{channel.Id}/stream.m3u8",
+                fullHlsUrl = $"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/live/{channel.Id}/stream.m3u8"
+            });
+        }
+    }
+
+    int activeCount = channelStatusList.Count(c => (bool)((dynamic)c).isLive);
+
+    return Results.Json(new
+    {
+        serverStatus = "运行中",
+        localIp = Globals.LocalIp,
+        httpPort = Globals.HTTP_PORT,
+        m3uUrl = $"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/jellyfin.m3u",
+        uptimeSeconds = (int)uptime.TotalSeconds,
+        uptimeText = $"{(int)uptime.TotalHours}小时 {uptime.Minutes}分 {uptime.Seconds}秒",
+        activeStreams = activeCount,
+        totalChannels = Globals.Config.Channels.Count,
+        channels = channelStatusList
+    });
+});
+
+// 2. 获取配置 (Channels + CookieProfiles)
+app.MapGet("/api/config", () =>
+{
+    lock (Globals.ConfigLock)
+    {
+        return Results.Json(Globals.Config);
+    }
+});
+
+// 3. 添加或更新频道
+app.MapPost("/api/channels", async (ChannelConfig newChannel) =>
+{
+    if (string.IsNullOrWhiteSpace(newChannel.Name))
+        return Results.BadRequest(new { error = "频道名称不能为空" });
+
+    if (string.IsNullOrWhiteSpace(newChannel.Platform))
+        return Results.BadRequest(new { error = "所属平台不能为空" });
+
+    if (string.IsNullOrWhiteSpace(newChannel.Url))
+        return Results.BadRequest(new { error = "直播间 URL 不能为空" });
+
+    // 若 ID 为空，自动生成 ID
+    if (string.IsNullOrWhiteSpace(newChannel.Id))
+    {
+        newChannel.Id = $"{newChannel.Platform.ToLower()}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+    }
+    else
+    {
+        // 移除非法字符
+        newChannel.Id = newChannel.Id.Trim().Replace(" ", "_");
+    }
+
+    lock (Globals.ConfigLock)
+    {
+        var existing = Globals.Config.Channels.FirstOrDefault(c => c.Id == newChannel.Id);
+        if (existing != null)
+        {
+            existing.Name = newChannel.Name;
+            existing.Platform = newChannel.Platform;
+            existing.Url = newChannel.Url;
+            existing.Quality = string.IsNullOrWhiteSpace(newChannel.Quality) ? "OD" : newChannel.Quality;
+            existing.CookieProfileKey = newChannel.CookieProfileKey;
+            existing.Enable = newChannel.Enable;
+        }
+        else
+        {
+            newChannel.Quality = string.IsNullOrWhiteSpace(newChannel.Quality) ? "OD" : newChannel.Quality;
+            Globals.Config.Channels.Add(newChannel);
+        }
+
+        RefreshChannelCookies();
+    }
+
+    await SaveConfigAsync();
+    Globals.StreamManager?.NotifyConfigChanged();
+
+    return Results.Ok(new { success = true, channel = newChannel });
+});
+
+// 4. 删除频道
+app.MapDelete("/api/channels/{id}", async (string id) =>
+{
+    ChannelConfig? removed = null;
+    lock (Globals.ConfigLock)
+    {
+        removed = Globals.Config.Channels.FirstOrDefault(c => c.Id == id);
+        if (removed != null)
+        {
+            Globals.Config.Channels.Remove(removed);
+        }
+    }
+
+    if (removed != null)
+    {
+        Globals.Extractors.TryRemove(id, out _);
+        Globals.M3u8Cache.TryRemove(id, out _);
+        Globals.StreamManager?.StopChannel(id);
+        
+        lock (Globals.StatusLock)
+        {
+            var st = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == id);
+            if (st != null) Globals.ChannelStatuses.Remove(st);
+        }
+
+        await SaveConfigAsync();
+        Globals.StreamManager?.NotifyConfigChanged();
+        return Results.Ok(new { success = true, message = $"频道 {removed.Name} 已删除" });
+    }
+
+    return Results.NotFound(new { error = "未找到指定频道" });
+});
+
+// 5. 一键切换频道启用/禁用状态
+app.MapPost("/api/channels/{id}/toggle", async (string id) =>
+{
+    bool newState = false;
+    lock (Globals.ConfigLock)
+    {
+        var channel = Globals.Config.Channels.FirstOrDefault(c => c.Id == id);
+        if (channel == null)
+            return Results.NotFound(new { error = "未找到指定频道" });
+
+        channel.Enable = !channel.Enable;
+        newState = channel.Enable;
+    }
+
+    await SaveConfigAsync();
+    Globals.StreamManager?.NotifyConfigChanged();
+
+    return Results.Ok(new { success = true, id, enable = newState });
+});
+
+// 6. 手动重启指定频道流
+app.MapPost("/api/channels/{id}/restart", (string id) =>
+{
+    var channel = Globals.Config.Channels.FirstOrDefault(c => c.Id == id);
+    if (channel == null)
+        return Results.NotFound(new { error = "未找到指定频道" });
+
+    Globals.Extractors.TryRemove(id, out _);
+    Globals.M3u8Cache.TryRemove(id, out _);
+    Globals.StreamManager?.RestartChannel(id);
+
+    return Results.Ok(new { success = true, message = $"已触发频道 {channel.Name} 重启" });
+});
+
+// 7. 添加或更新 Cookie Profile
+app.MapPost("/api/cookies", async (CookieProfileRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Key))
+        return Results.BadRequest(new { error = "Cookie 标识 (Key) 不能为空" });
+
+    lock (Globals.ConfigLock)
+    {
+        Globals.Config.CookieProfiles[req.Key.Trim()] = req.Cookie ?? "";
+        RefreshChannelCookies();
+    }
+
+    await SaveConfigAsync();
+    Globals.StreamManager?.NotifyConfigChanged();
+
+    return Results.Ok(new { success = true, key = req.Key });
+});
+
+// 8. 删除 Cookie Profile
+app.MapDelete("/api/cookies/{key}", async (string key) =>
+{
+    bool removed = false;
+    lock (Globals.ConfigLock)
+    {
+        removed = Globals.Config.CookieProfiles.Remove(key);
+        if (removed)
+        {
+            // 清理对应频道的 CookieProfileKey 引用
+            foreach (var ch in Globals.Config.Channels.Where(c => c.CookieProfileKey == key))
+            {
+                ch.CookieProfileKey = null;
+                ch.Cookies = "";
+            }
+        }
+    }
+
+    if (removed)
+    {
+        await SaveConfigAsync();
+        Globals.StreamManager?.NotifyConfigChanged();
+        return Results.Ok(new { success = true, message = $"Cookie Profile '{key}' 已删除" });
+    }
+
+    return Results.NotFound(new { error = "未找到指定的 Cookie Profile" });
+});
+
 // Master Playlist Endpoint - 指向动态代理而非静态文件
 app.MapGet("/jellyfin.m3u", () =>
 {
     var m3uContent = new StringBuilder("#EXTM3U\n");
-    foreach (var channel in Globals.Config.Channels)
+    lock (Globals.ConfigLock)
     {
-        if (!channel.Enable) continue;
-        m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\",{channel.Name}");
-        m3uContent.AppendLine($"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/live/{channel.Id}/stream.m3u8");
+        foreach (var channel in Globals.Config.Channels)
+        {
+            if (!channel.Enable) continue;
+            m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\" group-title=\"{channel.Platform}\",{channel.Name}");
+            m3uContent.AppendLine($"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/live/{channel.Id}/stream.m3u8");
+        }
     }
     
     return Results.Content(m3uContent.ToString(), "application/x-mpegURL");
@@ -314,16 +547,15 @@ static async Task<bool> LoadConfigAsync()
 
     try
     {
-        string jsonString = await File.ReadAllTextAsync(configPath);
-        Globals.Config = JsonSerializer.Deserialize<AppConfig>(
-            jsonString,
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-        ) ?? new AppConfig();
-
-        if (Globals.Config.Channels == null || Globals.Config.Channels.Count == 0)
+        string jsonString = await File.ReadAllTextAsync(configPath, Encoding.UTF8);
+        lock (Globals.ConfigLock)
         {
-            Console.WriteLine($"错误：{Globals.CONFIG_FILE_NAME} 中没有配置任何频道。");
-            return false;
+            Globals.Config = JsonSerializer.Deserialize<AppConfig>(
+                jsonString,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+            ) ?? new AppConfig();
+
+            RefreshChannelCookies();
         }
 
         lock (Globals.StatusLock)
@@ -335,29 +567,53 @@ static async Task<bool> LoadConfigAsync()
             }
         }
 
-        if (Globals.Config.CookieProfiles != null)
-        {
-            foreach (var channel in Globals.Config.Channels)
-            {
-                if (!string.IsNullOrEmpty(channel.CookieProfileKey))
-                {
-                    if (Globals.Config.CookieProfiles.TryGetValue(channel.CookieProfileKey, out var cookieString))
-                    {
-                        channel.Cookies = cookieString;
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[配置警告] 频道 [{channel.Name}] 引用的 CookieProfileKey \"{channel.CookieProfileKey}\" 不存在。");
-                    }
-                }
-            }
-        }
         return true;
     }
     catch (Exception ex)
     {
         Console.WriteLine($"读取或解析 {Globals.CONFIG_FILE_NAME} 失败: {ex.Message}");
         return false;
+    }
+}
+
+static async Task<bool> SaveConfigAsync()
+{
+    try
+    {
+        string configPath = Path.Combine(AppContext.BaseDirectory, Globals.CONFIG_FILE_NAME);
+        string jsonString;
+        lock (Globals.ConfigLock)
+        {
+            var options = new JsonSerializerOptions 
+            { 
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            jsonString = JsonSerializer.Serialize(Globals.Config, options);
+        }
+
+        await File.WriteAllTextAsync(configPath, jsonString, Encoding.UTF8);
+        return true;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[保存配置错误] {ex.Message}");
+        return false;
+    }
+}
+
+static void RefreshChannelCookies()
+{
+    if (Globals.Config.CookieProfiles == null) return;
+    foreach (var channel in Globals.Config.Channels)
+    {
+        if (!string.IsNullOrEmpty(channel.CookieProfileKey))
+        {
+            if (Globals.Config.CookieProfiles.TryGetValue(channel.CookieProfileKey, out var cookieString))
+            {
+                channel.Cookies = cookieString;
+            }
+        }
     }
 }
 
@@ -418,14 +674,18 @@ public class ChannelStatus
     public int RetryCount { get; set; } = 0;
 }
 
+public class CookieProfileRequest
+{
+    public string Key { get; set; } = string.Empty;
+    public string? Cookie { get; set; }
+}
+
 // -------------------------------------------------------------
 // Globals & Constants
 // -------------------------------------------------------------
-// 代理缓存条目，用于减少对虎牙 CDN 的重复请求
 public class M3u8CacheEntry
 {
     public string Content { get; set; } = "";
-    // 已解析出的子播放列表 URL（跳过主列表解析）
     public string? ResolvedSubPlaylistUrl { get; set; }
     public DateTime FetchedAt { get; set; }
 }
@@ -437,16 +697,17 @@ public static class Globals
     public static readonly string HLS_FULL_PATH = Path.Combine(AppContext.BaseDirectory, HLS_DIR);
     public const string CONFIG_FILE_NAME = "config.json";
     
+    public static readonly DateTime StartTimeUtc = DateTime.UtcNow;
     public static AppConfig Config = new();
+    public static readonly object ConfigLock = new();
     public static List<ChannelStatus> ChannelStatuses = [];
     public static readonly object StatusLock = new();
     public static string HttpServerStatus = "HTTP 服务器正在启动...";
     public static string LocalIp = "127.0.0.1";
     public static readonly ConcurrentDictionary<string, BaseExtractor> Extractors = new();
     public static readonly HttpClient HttpClient = new();
-    // 代理 m3u8 缓存，key = channelId，TTL = 1.5s
-    // 目的：FFmpeg 每 ~2s 拉一次列表，缓存可消除对虎牙 CDN 的重复网络往返，减少卡顿
     public static readonly ConcurrentDictionary<string, M3u8CacheEntry> M3u8Cache = new();
+    public static StreamManagerService? StreamManager;
     
     public static void UpdateStatus(string channelId, string message, ConsoleColor color, bool incrementRetry = false)
     {
@@ -490,7 +751,7 @@ public class RenderService : BackgroundService
                     Console.WriteLine("此窗口必须保持打开。按 [回车键] 可随时停止服务器...".PadRight(safeWidth));
                     Console.WriteLine(Globals.HttpServerStatus.PadRight(safeWidth));
                     Console.WriteLine(new string('=', safeWidth));
-                    Console.WriteLine("频道状态：".PadRight(safeWidth));
+                    Console.WriteLine("频道状态 (管理后台: http://localhost:9898)：".PadRight(safeWidth));
                     Console.WriteLine(new string('-', safeWidth));
 
                     string timeText = $"最后刷新时间：{DateTime.Now:yyyy-MM-dd HH:mm:ss}";
@@ -521,7 +782,7 @@ public class RenderService : BackgroundService
                     }
 
                     Console.ResetColor();
-                } catch (IOException) { } // Ignore Handle invalid errors in headless tasks
+                } catch (IOException) { }
             }
             catch { }
 
@@ -539,11 +800,41 @@ public class RenderService : BackgroundService
 
 public class StreamManagerService : BackgroundService
 {
-    private const int HEALTH_CHECK_SECONDS = 30;
+    private const int HEALTH_CHECK_SECONDS = 25;
     private const int STALE_THRESHOLD_SECONDS = 90;
     private static readonly string? FFMPEG_EXE_PATH = ResolveFfmpegPath();
     
     private readonly ConcurrentDictionary<string, Process> _ffmpegProcesses = new();
+    private readonly AutoResetEvent _triggerEvent = new(false);
+
+    public StreamManagerService()
+    {
+        Globals.StreamManager = this;
+    }
+
+    public void NotifyConfigChanged()
+    {
+        _triggerEvent.Set();
+    }
+
+    public void RestartChannel(string channelId)
+    {
+        if (_ffmpegProcesses.TryRemove(channelId, out var proc))
+        {
+            try { if (!proc.HasExited) proc.Kill(); } catch { }
+        }
+        _triggerEvent.Set();
+    }
+
+    public void StopChannel(string channelId)
+    {
+        if (_ffmpegProcesses.TryRemove(channelId, out var proc))
+        {
+            try { if (!proc.HasExited) proc.Kill(); } catch { }
+        }
+        string dir = Path.Combine(Globals.HLS_FULL_PATH, channelId);
+        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+    }
 
     private static string? ResolveFfmpegPath()
     {
@@ -580,17 +871,49 @@ public class StreamManagerService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            foreach (var channel in Globals.Config.Channels)
+            List<ChannelConfig> currentChannels;
+            lock (Globals.ConfigLock)
+            {
+                currentChannels = [.. Globals.Config.Channels];
+            }
+
+            var currentChannelIds = currentChannels.Select(c => c.Id).ToHashSet();
+
+            // 1. 清理已在配置中被删除的频道的进程与状态
+            foreach (var runningId in _ffmpegProcesses.Keys.ToArray())
+            {
+                if (!currentChannelIds.Contains(runningId))
+                {
+                    StopChannel(runningId);
+                }
+            }
+
+            lock (Globals.StatusLock)
+            {
+                Globals.ChannelStatuses.RemoveAll(s => !currentChannelIds.Contains(s.Id));
+                foreach (var ch in currentChannels)
+                {
+                    if (!Globals.ChannelStatuses.Any(s => s.Id == ch.Id))
+                    {
+                        Globals.ChannelStatuses.Add(new ChannelStatus { Id = ch.Id, Name = ch.Name });
+                    }
+                }
+            }
+
+            // 2. 遍历检查各个频道
+            foreach (var channel in currentChannels)
             {
                 if (stoppingToken.IsCancellationRequested) break;
 
-                var status = Globals.ChannelStatuses.First(s => s.Id == channel.Id);
+                var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channel.Id);
+                if (status == null) continue;
 
+                // 如果频道未启用
                 if (!channel.Enable)
                 {
                     if (_ffmpegProcesses.TryGetValue(channel.Id, out var activeProcess))
                     {
-                        Globals.UpdateStatus(channel.Id, "频道已在配置中禁用，正在停止 FFmpeg...", ConsoleColor.DarkGray);
+                        Globals.UpdateStatus(channel.Id, "已禁用，正在停止 FFmpeg...", ConsoleColor.DarkGray);
                         try { activeProcess.Kill(); } catch { }
                         _ffmpegProcesses.TryRemove(channel.Id, out _);
                     }
@@ -626,7 +949,7 @@ public class StreamManagerService : BackgroundService
                             }
                             else
                             {
-                                Globals.UpdateStatus(channel.Id, "直播中", ConsoleColor.Green);
+                                Globals.UpdateStatus(channel.Id, "推流中", ConsoleColor.Green);
                                 status.RetryCount = 0;
                             }
                         }
@@ -645,12 +968,14 @@ public class StreamManagerService : BackgroundService
 
             try
             {
-                await Task.Delay(HEALTH_CHECK_SECONDS * 1000, stoppingToken);
+                // 等待下一个健康巡检周期，或由 API 立即唤醒
+                await Task.Run(() => _triggerEvent.WaitOne(TimeSpan.FromSeconds(HEALTH_CHECK_SECONDS)), stoppingToken);
             }
             catch (TaskCanceledException)
             {
                 break;
             }
+            catch (Exception) { }
         }
         
         // Cleanup on stop
@@ -662,8 +987,6 @@ public class StreamManagerService : BackgroundService
         string channelHlsDir = Path.Combine(Globals.HLS_FULL_PATH, channel.Id);
         try
         {
-            // 不再删除整个目录，只清理旧的 ts 和 m3u8 文件
-            // 这样当健康检查触发重启时，Jellyfin 不会因为目录消失而断流
             if (Directory.Exists(channelHlsDir) && !_ffmpegProcesses.ContainsKey(channel.Id))
             {
                 foreach (var file in Directory.GetFiles(channelHlsDir, "*.ts")) 
@@ -705,11 +1028,11 @@ public class StreamManagerService : BackgroundService
         if (ffmpegProcess != null)
         {
             _ffmpegProcesses[channel.Id] = ffmpegProcess;
-            Globals.UpdateStatus(channel.Id, "已启动。", ConsoleColor.Green);
+            Globals.UpdateStatus(channel.Id, "已启动推流", ConsoleColor.Green);
         }
         else
         {
-            Globals.UpdateStatus(channel.Id, "FFmpeg 进程启动失败。", ConsoleColor.Red);
+            Globals.UpdateStatus(channel.Id, "FFmpeg 进程启动失败", ConsoleColor.Red);
         }
     }
 
@@ -747,15 +1070,6 @@ public class StreamManagerService : BackgroundService
         string m3u8Path = Path.Combine(channelHlsDir, "stream.m3u8");
         string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-        // hls_time 2: 每片2秒，降低播放端等待新片的延迟
-        // hls_list_size 10: 只保留最新 ~20 秒的分片窗口（2s * 10 = 20s）
-        //   缩小窗口的目的：防止 Jellyfin 播放器漂移到已被删除的旧分片区域，
-        //   漂移距离越短，客户端越难落后到已删除区间，从而避免长时间播放后变卡的问题。
-        // hls_delete_threshold 5: 多保留5个已删除分片，给 Jellyfin 额外的容错时间
-        // hls_allow_cache 0: 在 m3u8 中注入 #EXT-X-ALLOW-CACHE:NO，
-        //   明确告知 HLS 播放器"这是直播流，禁止缓存旧分片，始终跟随直播边缘(live edge)"
-        // -c:a copy: 音频直接流复制，避免软解码/重编码带来的额外延迟和 CPU 开销
-        // delete_segments+temp_file: 原子写入 m3u8 + 清理旧分片
         string arguments = $"-fflags +genpts+discardcorrupt -err_detect ignore_err "
             + $"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -reconnect_on_network_error 1 "
             + $"-rw_timeout 15000000 "

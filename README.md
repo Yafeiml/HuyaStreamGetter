@@ -87,32 +87,92 @@
 
 ---
 
-## 🚀 使用方法说明
+## 🖥️ 现代化 Web 管理后台
+
+程序启动后，直接在浏览器中打开：
+👉 **`http://<主机IP>:9898`** (本地访问 `http://localhost:9898`)
+
+即可进入现代简洁、自适应移动端的可视化管理控制台：
+
+- 📊 **实时状态大盘**：实时展示当前活跃推流数、服务运行时间、各频道推流状态与重试计数；
+- 📺 **频道热重载管理**：在网页端直接**添加、编辑、删除**频道，或者**一键开关、一键重启推流**，改动**实时热生效，无需重启服务**；
+- 🍪 **Cookie 凭据池**：统一维护虎牙/斗鱼/B站的 Cookie，添加频道时下拉快速绑定；
+- ▶️ **内置 HLS 试播播放器**：点击频道卡片上的【试播】按钮，直接在浏览器内实时弹窗播放直播流进行快速验证；
+- 📋 **一键复制 M3U 订阅源**：一键复制 Jellyfin / IPTV 调谐器链接。
+
+---
+
+## 🐳 Docker / NAS 极速部署
+
+本项目提供了官方多架构 Docker 镜像（支持 `linux/amd64` 与 `linux/arm64`），完美适配 **群晖 (Synology)、威联通 (QNAP)、Unraid、飞牛 OS (fnOS)、TrueNAS 及 Linux 软路由**。
+
+### 方式 1：Docker Compose 一键启动（推荐）
+
+在任意目录下创建 `docker-compose.yml`：
+
+```yaml
+version: '3.8'
+
+services:
+  huya-stream-gateway:
+    image: ghcr.io/yafeiml/huyastreamgetter:latest
+    container_name: huya-stream-gateway
+    restart: unless-stopped
+    ports:
+      - "9898:9898"
+    volumes:
+      # 持久化配置文件（请确保本地当前目录下有 config.json，可从 config.example.json 复制）
+      - ./config.json:/app/config.json
+    tmpfs:
+      # 【NAS 核心保护优化】将 HLS 切片缓存挂载到系统内存（128M 足够），避免 7x24 小时读写机械硬盘导致磨损
+      - /app/hls_stream:size=128M,mode=1777
+    environment:
+      - TZ=Asia/Shanghai
+```
+
+在同级目录下执行启动：
+```bash
+# 1. 复制一份初始配置文件（若已有可跳过）
+curl -sSL https://raw.githubusercontent.com/Yafeiml/HuyaStreamGetter/main/config.example.json -o config.json
+
+# 2. 启动容器
+docker compose up -d
+```
+
+### 方式 2：Docker 命令行启动
+
+```bash
+docker run -d \
+  --name huya-stream-gateway \
+  --restart unless-stopped \
+  -p 9898:9898 \
+  -v $(pwd)/config.json:/app/config.json \
+  --tmpfs /app/hls_stream:size=128M \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/yafeiml/huyastreamgetter:latest
+```
+
+启动完成后，直接访问 `http://<NAS的IP>:9898` 即可通过 Web 界面可视化管理！
+
+---
+
+## 🚀 本地 Windows / 源码使用说明
 
 ### 步骤 1：准备运行环境
-1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（如果下载的是独立免安装版则无需安装 .NET）。
+1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（如果从 [Releases](https://github.com/Yafeiml/HuyaStreamGetter/releases) 下载独立版则无需安装 .NET，解压即跑）。
 2. **准备 FFmpeg**（支持以下任选一种方式）：
-   - **方式 1（最简单）**：下载 [FFmpeg 官方包](https://ffmpeg.org/download.html)，将 `ffmpeg.exe` 直接解压放入本程序的同级目录中。
-   - **方式 2（环境变量）**：如果系统中已安装过 FFmpeg，本程序会**自动扫描系统 `PATH` 环境变量**并调用，无需额外复制。
+   - **方式 1（最简单）**：从 Releases 直接下载打包好的完整压缩包（已内置官方精简版 `ffmpeg.exe`）。
+   - **方式 2（环境变量）**：程序会**自动扫描系统 `PATH` 环境变量**，已有 FFmpeg 的电脑无需额外配置。
    - **方式 3（Windows 终端一行命令安装）**：在终端运行 `winget install Gyan.FFmpeg` 即可全自动安装。
 
-### 步骤 2：配置直播频道与 Cookie
-1. 复制配置文件模板：
-   ```bash
-   cp config.example.json config.json
-   ```
-2. 编辑 `config.json` 添加您想观看的主播或赛事直播间（详细参数见后文）。
-
-### 步骤 3：启动服务
+### 步骤 2：启动服务
 在项目目录下执行：
 ```bash
 dotnet run
 ```
-或直接双击运行发布后的 `HuyaStreamGetter.exe`。终端窗口将展示控制面板与各频道实时状态。
+或直接双击运行下载的 `HuyaStreamGetter.exe`。
 
-> 💡 **提示**：如果局域网其他设备无法访问，请确保在 Windows 防火墙中放行 `9898` 端口（入站规则）。
-
-### 步骤 4：在客户端中挂载播放
+### 步骤 3：在客户端中挂载播放
 
 #### 方式 A：接入 Jellyfin / Emby（推荐，极米 H1 / 电视盒端）
 1. 登录 Jellyfin / Emby 管理后台。

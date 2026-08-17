@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HuyaStreamGateway - 直播流中继网关管理面板</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- Hls.js for live preview player -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation -->
+        <header class="app-header">
+            <div class="header-brand">
+                <div class="brand-logo">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"></path>
+                        <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02" fill="currentColor"></polygon>
+                    </svg>
+                </div>
+                <div class="brand-text">
+                    <h1>HuyaStreamGateway</h1>
+                    <span class="sub-title">多平台直播中继与 IPTV 转换服务</span>
+                </div>
+            </div>
+
+            <div class="header-actions">
+                <div class="status-indicator">
+                    <span class="pulse-dot"></span>
+                    <span id="server-status-text">服务运行中</span>
+                </div>
+                <button class="btn btn-secondary" id="btn-copy-m3u" title="复制用于 Jellyfin / IPTV 的 M3U 订阅源地址">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <span>复制 M3U 地址</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Stats Overview Cards -->
+        <section class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon icon-live">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+                        <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+                        <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                        <line x1="12" y1="20" x2="12.01" y2="20"></line>
+                    </svg>
+                </div>
+                <div class="stat-data">
+                    <div class="stat-value" id="stat-active-streams">0 / 0</div>
+                    <div class="stat-label">活跃推流 / 总频道数</div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon icon-uptime">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                </div>
+                <div class="stat-data">
+                    <div class="stat-value" id="stat-uptime">0小时 0分</div>
+                    <div class="stat-label">服务运行时长</div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon icon-ip">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                        <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                        <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                    </svg>
+                </div>
+                <div class="stat-data">
+                    <div class="stat-value" id="stat-local-ip">127.0.0.1:9898</div>
+                    <div class="stat-label">局域网中继端点</div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon icon-cookie">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <circle cx="8" cy="9" r="1.5" fill="currentColor"></circle>
+                        <circle cx="15" cy="8" r="1" fill="currentColor"></circle>
+                        <circle cx="10" cy="14" r="1" fill="currentColor"></circle>
+                        <circle cx="15" cy="14" r="1.5" fill="currentColor"></circle>
+                    </svg>
+                </div>
+                <div class="stat-data">
+                    <div class="stat-value" id="stat-cookie-count">0 个配置</div>
+                    <div class="stat-label">已配置 Cookie 凭据池</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Controls Bar -->
+            <div class="content-toolbar">
+                <div class="toolbar-left">
+                    <h2>频道监控与管理</h2>
+                    <span class="badge" id="badge-total-channels">0 个频道</span>
+                </div>
+                <div class="toolbar-right">
+                    <button class="btn btn-secondary" id="btn-manage-cookies">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <circle cx="8" cy="9" r="1.5" fill="currentColor"></circle>
+                            <circle cx="15" cy="8" r="1" fill="currentColor"></circle>
+                            <circle cx="10" cy="14" r="1" fill="currentColor"></circle>
+                            <circle cx="15" cy="14" r="1.5" fill="currentColor"></circle>
+                        </svg>
+                        <span>管理 Cookie 凭据池</span>
+                    </button>
+                    <button class="btn btn-primary" id="btn-add-channel">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        <span>添加直播频道</span>
+                    </button>
+                    <button class="btn btn-icon" id="btn-manual-refresh" title="立即刷新">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <polyline points="1 20 1 14 7 14"></polyline>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Channels Grid -->
+            <div class="channels-grid" id="channels-container">
+                <!-- Channel Cards dynamically injected by app.js -->
+                <div class="loading-placeholder">正在获取直播频道状态...</div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal: Add / Edit Channel -->
+    <div class="modal-backdrop" id="modal-channel">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="modal-channel-title">添加直播频道</h3>
+                <button class="modal-close" onclick="closeModal('modal-channel')">&times;</button>
+            </div>
+            <form id="form-channel" onsubmit="saveChannel(event)">
+                <div class="form-group">
+                    <label for="channel-platform">直播平台 <span class="required">*</span></label>
+                    <select id="channel-platform" required onchange="onPlatformChange()">
+                        <option value="huya">虎牙直播 (Huya)</option>
+                        <option value="douyu">斗鱼直播 (Douyu)</option>
+                        <option value="bilibili">哔哩哔哩 (Bilibili)</option>
+                    </select>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label for="channel-name">频道名称 <span class="required">*</span></label>
+                        <input type="text" id="channel-name" placeholder="例如：虎牙-CS赛事" required>
+                    </div>
+                    <div class="form-group flex-1">
+                        <label for="channel-id">频道唯一 ID <span class="tip">(留空自动生成)</span></label>
+                        <input type="text" id="channel-id" placeholder="如 huya_eslcs">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="channel-url">直播间链接 / 房间号 <span class="required">*</span></label>
+                    <input type="text" id="channel-url" placeholder="https://www.huya.com/eslcs 或房间号" required>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label for="channel-quality">画质等级</label>
+                        <select id="channel-quality">
+                            <option value="OD">OD (原画/最高码率)</option>
+                            <option value="BD">BD (蓝光 4K/1080P)</option>
+                            <option value="HD">HD (超清)</option>
+                            <option value="SD">SD (高清)</option>
+                        </select>
+                    </div>
+                    <div class="form-group flex-1">
+                        <label for="channel-cookie-key">绑定 Cookie 凭据</label>
+                        <select id="channel-cookie-key">
+                            <option value="">-- 免登录模式 --</option>
+                            <!-- Dynamically populated -->
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <label class="switch-label">
+                        <input type="checkbox" id="channel-enable" checked>
+                        <span class="switch-slider"></span>
+                        <span class="switch-text">立即启用此频道并加入 M3U 调谐器</span>
+                    </label>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('modal-channel')">取消</button>
+                    <button type="submit" class="btn btn-primary" id="btn-save-channel">保存并应用</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal: Cookie Profile Management -->
+    <div class="modal-backdrop" id="modal-cookies">
+        <div class="modal-card modal-large">
+            <div class="modal-header">
+                <h3>Cookie 凭据池管理</h3>
+                <button class="modal-close" onclick="closeModal('modal-cookies')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="section-desc">在此统一配置各平台的 Cookie 凭据。频道配置中绑定对应 Cookie 后，可直接解锁原画/蓝光 4K 等高码率直播流。</p>
+                
+                <div class="cookie-list" id="cookie-list-container">
+                    <!-- Cookie items rendered here -->
+                </div>
+
+                <hr class="modal-divider">
+
+                <form id="form-cookie" onsubmit="saveCookie(event)" class="cookie-add-box">
+                    <h4>添加 / 编辑 Cookie 配置</h4>
+                    <div class="form-group">
+                        <label for="cookie-key">配置标识 Key <span class="required">*</span> <span class="tip">(如 huya_main, douyu_vip, bilibili_main)</span></label>
+                        <input type="text" id="cookie-key" placeholder="例如：huya_main" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="cookie-value">Cookie 完整内容</label>
+                        <textarea id="cookie-value" rows="3" placeholder="在此粘贴从浏览器 F12 复制的 Cookie 字符串..."></textarea>
+                    </div>
+                    <div class="cookie-form-actions">
+                        <button type="submit" class="btn btn-primary">保存 Cookie</button>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cookies')">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Live Preview Player -->
+    <div class="modal-backdrop" id="modal-preview">
+        <div class="modal-card modal-player">
+            <div class="modal-header">
+                <h3 id="preview-title">直播流实时试播</h3>
+                <button class="modal-close" onclick="closePreviewModal()">&times;</button>
+            </div>
+            <div class="player-wrapper">
+                <video id="preview-video" controls autoplay muted playsinline></video>
+                <div class="player-error" id="player-error-msg" style="display: none;"></div>
+            </div>
+            <div class="player-info-bar">
+                <span class="player-url-label">HLS 播放地址：</span>
+                <code id="preview-hls-url">/live/.../stream.m3u8</code>
+                <button class="btn btn-sm btn-secondary" id="btn-copy-stream-url">复制链接</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

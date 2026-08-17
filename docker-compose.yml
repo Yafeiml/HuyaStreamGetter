@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  huya-stream-gateway:
+    # 支持本地自动构建，或直接拉取发布的镜像
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yafeiml/huya-stream-getter:latest
+    container_name: huya-stream-gateway
+    restart: unless-stopped
+    ports:
+      - "9898:9898"
+    volumes:
+      # 持久化配置文件（保存频道列表与 Cookie 凭据）
+      - ./config.json:/app/config.json
+    tmpfs:
+      # 【重要优化】将切片缓存放入内存盘（128MB 足够），彻底杜绝频繁读写损坏 NAS 机械硬盘或 SSD
+      - /app/hls_stream:size=128M,mode=1777
+    environment:
+      - TZ=Asia/Shanghai
+      - ASPNETCORE_ENVIRONMENT=Production

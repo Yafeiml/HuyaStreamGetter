@@ -1,0 +1,14 @@
+**/.git
+**/.vs
+**/bin
+**/obj
+**/dist
+**/hls_stream
+**/*.user
+**/*.log
+ffmpeg.exe
+ffmpeg
+ffprobe.exe
+ffprobe
+*.zip
+*.tar.gz
