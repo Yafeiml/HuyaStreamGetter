@@ -305,7 +305,7 @@ body {
     border-color: var(--primary);
 }
 
-/* 旋转刷新动画 */
+/* 旋转刷新动画 (图3) */
 @keyframes spinRefresh {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
@@ -462,7 +462,7 @@ body {
     white-space: nowrap;
 }
 
-/* 状态展示盒子与动态图标 */
+/* 状态展示盒子与动态图标 (图4) */
 .status-msg-box {
     background: var(--bg-input);
     border: 1px solid rgba(255, 255, 255, 0.05);
@@ -611,17 +611,17 @@ body {
 }
 
 /* ==========================================================
-   Forms & Pixel-Perfect Field Alignment
+   Forms & Pixel-Perfect Field Alignment (图2 核心对齐修复)
    ========================================================== */
+form {
+    padding: 18px 0 0;
+}
+
 .form-group {
     margin-bottom: 16px;
     padding: 0 24px;
     display: flex;
     flex-direction: column;
-}
-
-.form-group:first-child {
-    margin-top: 18px;
 }
 
 .form-row {
@@ -634,7 +634,7 @@ body {
 
 .form-row .form-group {
     padding: 0;
-    margin-bottom: 0;
+    margin: 0;
 }
 
 label {
@@ -646,8 +646,9 @@ label {
     font-weight: 500;
     color: var(--text-secondary);
     margin-bottom: 6px;
-    min-height: 20px;
+    height: 20px;
     line-height: 20px;
+    overflow: hidden;
 }
 
 .required {
@@ -675,6 +676,7 @@ select {
     outline: none;
     box-sizing: border-box;
     transition: border-color 0.15s;
+    margin: 0;
 }
 
 textarea {
