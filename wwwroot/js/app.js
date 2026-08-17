@@ -27,9 +27,14 @@ function setupEventListeners() {
     // Copy M3U Button
     document.getElementById('btn-copy-m3u')?.addEventListener('click', copyM3uUrl);
     
-    // Manual Refresh Button
-    document.getElementById('btn-manual-refresh')?.addEventListener('click', () => {
-        loadStatus(true);
+    // Manual Refresh Button with Click Spin Animation (图3)
+    document.getElementById('btn-manual-refresh')?.addEventListener('click', async () => {
+        const btn = document.getElementById('btn-manual-refresh');
+        btn?.classList.add('spinning');
+        await loadStatus(true);
+        setTimeout(() => {
+            btn?.classList.remove('spinning');
+        }, 600);
     });
 
     // Add Channel Button
@@ -123,21 +128,79 @@ function createChannelCardHtml(ch) {
 
     let statusBadgeClass = 'waiting';
     let statusText = ch.statusMessage || '准备中';
+    let statusIconHtml = '';
 
+    // 状态分类判断与图标 (图1 & 图4)
     if (!ch.enable) {
         statusBadgeClass = 'disabled';
         statusText = '已禁用';
+        statusIconHtml = `
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#64748b" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
+            </svg>
+        `;
     } else if (ch.isLive) {
         statusBadgeClass = 'live';
-        statusText = '🟢 推流中';
-    } else if (ch.statusMessage?.includes('失败') || ch.statusMessage?.includes('错误')) {
+        statusText = '推流中';
+        // 动态跳动绿色声波动画图标 (图4)
+        statusIconHtml = `
+            <div class="live-wave-anim" title="正在实时推流">
+                <span class="bar"></span>
+                <span class="bar"></span>
+                <span class="bar"></span>
+            </div>
+        `;
+    } else if (ch.statusMessage?.includes('未开播')) {
+        statusBadgeClass = 'waiting';
+        statusText = '未开播';
+        statusIconHtml = `
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+        `;
+    } else if (ch.statusMessage?.includes('Cookie') || ch.statusMessage?.includes('登录')) {
         statusBadgeClass = 'error';
-        statusText = '🔴 ' + ch.statusMessage;
+        statusText = 'Cookie失效';
+        statusIconHtml = `
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+        `;
+    } else {
+        statusBadgeClass = 'error';
+        statusText = ch.statusMessage || '异常';
+        statusIconHtml = `
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+        `;
     }
 
     const boundCookieText = ch.cookieProfileKey 
         ? `<span title="${ch.cookieProfileKey}">${ch.cookieProfileKey}</span>` 
         : '<span style="color: var(--text-muted);">免登录</span>';
+
+    // 试播按钮可用状态 (图1：只有推流中才能试播，未开播/失效则禁用)
+    const canPreview = ch.isLive;
+    const previewBtnHtml = canPreview
+        ? `<button class="btn btn-sm btn-secondary" onclick="openPreviewModal('${ch.id}', '${escapeHtml(ch.name)}', '${ch.hlsUrl}')" title="在网页中实时试播">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                <span>试播</span>
+           </button>`
+        : `<button class="btn btn-sm btn-secondary btn-disabled" disabled title="当前未处于推流中，无法试播">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                <span>试播</span>
+           </button>`;
 
     return `
         <div class="channel-card ${ch.enable ? '' : 'disabled'}" id="card-${ch.id}">
@@ -169,14 +232,10 @@ function createChannelCardHtml(ch) {
                     </div>
                 </div>
 
-                <div class="status-msg-box" title="${escapeHtml(ch.statusMessage)}">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <line x1="12" y1="16" x2="12" y2="12"></line>
-                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
-                    </svg>
-                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(ch.statusMessage)}</span>
-                    ${ch.retryCount > 0 ? `<span style="color: var(--danger); margin-left: auto;">(重试 ${ch.retryCount})</span>` : ''}
+                <div class="status-msg-box ${ch.isLive ? 'live' : ''}" title="${escapeHtml(ch.statusMessage)}">
+                    ${statusIconHtml}
+                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; ${ch.isLive ? 'color: #34d399; font-weight: 500;' : ''}">${escapeHtml(ch.statusMessage)}</span>
+                    ${ch.retryCount > 0 && !ch.statusMessage?.includes('未开播') ? `<span style="color: var(--danger); margin-left: auto; font-size: 11px;">(重试 ${ch.retryCount})</span>` : ''}
                 </div>
             </div>
 
@@ -187,12 +246,7 @@ function createChannelCardHtml(ch) {
                 </label>
 
                 <div class="action-btns">
-                    <button class="btn btn-sm btn-secondary" onclick="openPreviewModal('${ch.id}', '${escapeHtml(ch.name)}', '${ch.hlsUrl}')" title="在网页中实时试播">
-                        <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                        </svg>
-                        <span>试播</span>
-                    </button>
+                    ${previewBtnHtml}
                     <button class="btn-icon" onclick="restartChannel('${ch.id}')" title="重启推流进程">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="23 4 23 10 17 10"></polyline>

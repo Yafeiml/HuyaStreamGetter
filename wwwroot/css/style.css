@@ -132,11 +132,13 @@ body {
     border-radius: 50%;
     box-shadow: 0 0 8px var(--success);
     animation: pulse 2s infinite;
+    display: inline-block;
+    flex-shrink: 0;
 }
 
 @keyframes pulse {
     0% { transform: scale(0.95); opacity: 0.8; }
-    50% { transform: scale(1.2); opacity: 1; }
+    50% { transform: scale(1.25); opacity: 1; }
     100% { transform: scale(0.95); opacity: 0.8; }
 }
 
@@ -265,6 +267,14 @@ body {
     border-color: rgba(255, 255, 255, 0.15);
 }
 
+.btn:disabled,
+.btn.btn-disabled {
+    opacity: 0.38 !important;
+    cursor: not-allowed !important;
+    pointer-events: none !important;
+    filter: grayscale(0.6);
+}
+
 .btn-danger-outline {
     background: transparent;
     border-color: rgba(239, 68, 68, 0.4);
@@ -283,13 +293,27 @@ body {
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
     cursor: pointer;
-    transition: all 0.15s;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .btn-icon:hover {
     color: var(--text-primary);
     background: var(--bg-card-hover);
     border-color: var(--primary);
+}
+
+/* 旋转刷新动画 */
+@keyframes spinRefresh {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.btn-icon.spinning svg,
+.spinning svg {
+    animation: spinRefresh 0.6s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-sm {
@@ -344,12 +368,14 @@ body {
     justify-content: space-between;
     align-items: flex-start;
     margin-bottom: 14px;
+    gap: 8px;
 }
 
 .channel-title-wrap {
     display: flex;
     align-items: center;
     gap: 10px;
+    overflow: hidden;
 }
 
 .platform-pill {
@@ -359,6 +385,7 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    flex-shrink: 0;
 }
 
 .platform-huya { background: rgba(245, 158, 11, 0.2); color: var(--huya-color); }
@@ -369,6 +396,9 @@ body {
     font-size: 16px;
     font-weight: 600;
     color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .status-pill {
@@ -379,6 +409,7 @@ body {
     border-radius: var(--radius-full);
     font-size: 12px;
     font-weight: 500;
+    flex-shrink: 0;
 }
 
 .status-pill.live {
@@ -431,17 +462,52 @@ body {
     white-space: nowrap;
 }
 
+/* 状态展示盒子与动态图标 */
 .status-msg-box {
     background: var(--bg-input);
     border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: var(--radius-sm);
-    padding: 8px 10px;
+    padding: 8px 12px;
     font-size: 12px;
     margin-bottom: 16px;
     color: var(--text-secondary);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
+    min-height: 36px;
+}
+
+.status-msg-box.live {
+    border-color: rgba(16, 185, 129, 0.25);
+    background: rgba(16, 185, 129, 0.06);
+}
+
+/* 动态绿色跳动声波/流波形动画 (推流中专属) */
+.live-wave-anim {
+    display: inline-flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 2px;
+    height: 14px;
+    width: 14px;
+    flex-shrink: 0;
+}
+
+.live-wave-anim .bar {
+    width: 2.5px;
+    background: #10b981;
+    border-radius: 2px;
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.6);
+    animation: barWave 1.2s ease-in-out infinite alternate;
+}
+
+.live-wave-anim .bar:nth-child(1) { height: 6px; animation-delay: 0.1s; }
+.live-wave-anim .bar:nth-child(2) { height: 14px; animation-delay: 0.35s; }
+.live-wave-anim .bar:nth-child(3) { height: 9px; animation-delay: 0.2s; }
+
+@keyframes barWave {
+    0% { height: 4px; opacity: 0.5; }
+    100% { height: 14px; opacity: 1; }
 }
 
 .channel-actions {
@@ -544,10 +610,14 @@ body {
     border-top: 1px solid var(--border-color);
 }
 
-/* Forms */
+/* ==========================================================
+   Forms & Pixel-Perfect Field Alignment
+   ========================================================== */
 .form-group {
     margin-bottom: 16px;
     padding: 0 24px;
+    display: flex;
+    flex-direction: column;
 }
 
 .form-group:first-child {
@@ -555,25 +625,29 @@ body {
 }
 
 .form-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 14px;
     padding: 0 24px;
+    margin-bottom: 16px;
 }
 
 .form-row .form-group {
     padding: 0;
-}
-
-.flex-1 {
-    flex: 1;
+    margin-bottom: 0;
 }
 
 label {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
     font-size: 13px;
     font-weight: 500;
     color: var(--text-secondary);
     margin-bottom: 6px;
+    min-height: 20px;
+    line-height: 20px;
 }
 
 .required {
@@ -587,17 +661,33 @@ label {
 }
 
 input[type="text"],
-select,
+select {
+    width: 100%;
+    height: 40px;
+    line-height: 38px;
+    padding: 0 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+}
+
 textarea {
     width: 100%;
     background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     color: var(--text-primary);
-    padding: 9px 12px;
+    padding: 10px 12px;
     font-size: 13px;
     font-family: inherit;
     outline: none;
+    box-sizing: border-box;
     transition: border-color 0.15s;
 }
 
@@ -805,8 +895,7 @@ textarea:focus {
 /* Responsive adjustments */
 @media (max-width: 640px) {
     .app-container { padding: 16px 12px; }
-    .form-row { flex-direction: column; gap: 0; }
-    .form-row .form-group { padding: 0 24px; }
+    .form-row { grid-template-columns: 1fr; gap: 14px; }
     .content-toolbar { flex-direction: column; align-items: stretch; }
     .toolbar-right { justify-content: flex-start; flex-wrap: wrap; }
 }

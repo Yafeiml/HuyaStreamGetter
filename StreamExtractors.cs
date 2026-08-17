@@ -109,7 +109,11 @@ namespace HuyaStreamGetter
                     var v2Json = JsonNode.Parse(v2JsonStr);
                     
                     if (v2Json?["data"]?["live_status"]?.GetValue<int>() == 0)
-                        throw new Exception("Failed to get any stream (Not Live)");
+                        throw new Exception("Not Live (未开播)");
+
+                    int code = v2Json?["code"]?.GetValue<int>() ?? 0;
+                    if (code == -101 || code == -400)
+                        throw new Exception("Cookie Invalid (Cookie失效或需登录)");
 
                     var streamArray = v2Json?["data"]?["playurl_info"]?["playurl"]?["stream"]?.AsArray();
                     if (streamArray != null && streamArray.Count > 0)
@@ -130,10 +134,11 @@ namespace HuyaStreamGetter
                         }
                     }
                 }
-                return null;
+                throw new Exception("Not Live (未开播)");
             }
             catch (Exception ex)
             {
+                if (ex.Message.Contains("Not Live") || ex.Message.Contains("Cookie Invalid")) throw;
                 throw new Exception($"Bilibili Error: {ex.Message}");
             }
         }
@@ -226,9 +231,10 @@ namespace HuyaStreamGetter
                 var playRes = await _httpClient.SendAsync(playReq);
                 var playJson = JsonNode.Parse(await playRes.Content.ReadAsStringAsync());
                 
-                if (playJson?["error"]?.GetValue<int>() == 0)
+                int errCode = playJson?["error"]?.GetValue<int>() ?? -1;
+                if (errCode == 0)
                 {
-                    var data = playJson["data"];
+                    var data = playJson?["data"];
                     string rtmpUrl = data?["rtmp_url"]?.GetValue<string>() ?? "";
                     string rtmpLive = data?["rtmp_live"]?.GetValue<string>() ?? "";
                     if (!string.IsNullOrEmpty(rtmpUrl) && !string.IsNullOrEmpty(rtmpLive))
@@ -236,10 +242,20 @@ namespace HuyaStreamGetter
                         return $"{rtmpUrl}/{rtmpLive}";
                     }
                 }
-                throw new Exception("Failed to get any stream (Not Live)");
+                else if (errCode == 102 || errCode == 104)
+                {
+                    throw new Exception("Not Live (未开播)");
+                }
+                else if (errCode == -5 || errCode == 51)
+                {
+                    throw new Exception("Cookie Invalid (Cookie失效或需登录)");
+                }
+
+                throw new Exception("Not Live (未开播)");
             }
             catch (Exception ex)
             {
+                if (ex.Message.Contains("Not Live") || ex.Message.Contains("Cookie Invalid")) throw;
                 throw new Exception($"Douyu Error: {ex.Message}");
             }
         }
@@ -329,7 +345,7 @@ namespace HuyaStreamGetter
                 var json = JsonNode.Parse(await res.Content.ReadAsStringAsync());
 
                 string status = json?["data"]?["realLiveStatus"]?.GetValue<string>() ?? "";
-                if (status != "ON") throw new Exception("Failed to get any stream (Not Live)");
+                if (status != "ON") throw new Exception("Not Live (未开播)");
 
                 string liveType = json?["data"]?["liveData"]?["gameHostName"]?.GetValue<string>() ?? "";
                 if (liveType == "lol")
@@ -374,10 +390,11 @@ namespace HuyaStreamGetter
                     }
                 }
                 
-                throw new Exception("Failed to get any stream (Not Live)");
+                throw new Exception("Cookie Invalid (Cookie失效或需登录)");
             }
             catch (Exception ex)
             {
+                if (ex.Message.Contains("Not Live") || ex.Message.Contains("Cookie Invalid")) throw;
                 throw new Exception($"Huya Error: {ex.Message}");
             }
         }

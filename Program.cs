@@ -1008,11 +1008,29 @@ public class StreamManagerService : BackgroundService
 
         if (string.IsNullOrEmpty(sourceStreamUrl))
         {
-            string errorMsg = error?.Contains("Failed to get any stream") ?? false
-                ? "未开播或Cookie失效"
-                : $"获取失败: {error}";
+            string errorMsg;
+            ConsoleColor color;
+            bool retryInc = true;
 
-            Globals.UpdateStatus(channel.Id, $"{errorMsg}", ConsoleColor.Red, incrementRetry: true);
+            if (error?.Contains("未开播") == true || error?.Contains("Not Live") == true)
+            {
+                errorMsg = "未开播";
+                color = ConsoleColor.DarkYellow;
+                retryInc = false;
+                status.RetryCount = 0;
+            }
+            else if (error?.Contains("Cookie") == true || error?.Contains("登录") == true)
+            {
+                errorMsg = "Cookie失效或需登录";
+                color = ConsoleColor.Red;
+            }
+            else
+            {
+                errorMsg = $"获取失败: {error}";
+                color = ConsoleColor.Red;
+            }
+
+            Globals.UpdateStatus(channel.Id, errorMsg, color, incrementRetry: retryInc);
             return;
         }
 
