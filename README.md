@@ -1,16 +1,31 @@
 # HuyaStreamGetter / LiveStreamGateway 🚀
 
-> 一个基于 **.NET 10** 与 **FFmpeg** 的高性能多平台直播流中继网关与 IPTV (M3U) 转换服务。
+> 基于 **.NET 10** 与 **FFmpeg** 构建的高性能多平台直播流中继网关与 IPTV (M3U) 转换服务。  
 > 专为 **Jellyfin / Emby / Kodi / VLC / IPTV 客户端** 打造，彻底解决各大直播平台防盗链签名过期、断流、卡顿及直播边缘漂移等痛点问题。
 
 ---
 
-## 🌟 项目亮点与核心解决的问题
+## 📖 诞生背景与初衷
 
-在将虎牙、斗鱼、B站等国内直播源接入 Jellyfin / Emby 等家庭影院系统时，常规方式通常会遭遇以下几个致命痛点，本项目针对性地进行了底层架构重构与深度优化：
+### 💡 为什么开发这个项目？
+许多家庭的老旧显示设备（例如 **极米 H1 投影仪**、老款智能电视、旧 Android 电视盒子等），其硬件解码芯片和运存配置较低。而如今各大直播平台（虎牙、斗鱼、B站）的官方 TV 版客户端越发臃肿：
+- ❌ **客户端臃肿**：充斥着复杂的 UI、礼物动画、弹幕渲染、后台广告与高占用逻辑。
+- ❌ **老设备频繁卡死**：在老旧设备上直接运行官方客户端，极易引发**内存溢出、严重卡顿、发热掉帧，甚至直接闪退与系统卡死**。
+- ❌ **纯净流难以直接播放**：各大平台的直播流（尤其是虎牙）带有严苛的防盗链与短效签名机制（~110秒自动过期），直接把原始链接填进播放器会频繁出现 403 Forbidden 断流。
 
-### 1. 🛡️ 虎牙防盗链与短效签名过期问题 (403 Forbidden)
-- **痛点**：虎牙 CDN 直播流的 HLS/FLV 签名（`wsSecret` 与 `wsTime`）通常只有约 110 秒有效期。常规播放器或直接调用 FFmpeg 拉流时，在切片更新或断线重连时使用原始链接必报 `403 Forbidden` 断流。
+### 🎯 架构解耦思想
+本项目采用 **“边缘中转 + 轻量渲染”** 的解耦架构：
+1. **中转服务（Windows / 软路由 / NAS）**：在局域网主机上运行 `HuyaStreamGateway`，负责处理最繁琐的 **直播流解析、动态反防盗链重签名、FFmpeg 守护切片与 M3U 网关分发**。
+2. **终端播放（极米 H1 / 电视盒子）**：老旧设备上仅需安装极其轻量、纯粹的播放客户端（如 **Jellyfin TV / Emby / Kodi / TiviMate / APTV**），老设备只需负责硬件解码播放纯净流。
+
+> **🎉 实测效果**：极米 H1 等老旧设备彻底摆脱客户端崩溃与卡顿，秒开直播，畅享丝滑稳定的 1080P/4K 原画赛事与主播流！
+
+---
+
+## 🌟 核心技术亮点与解决的痛点
+
+### 1. 🛡️ 虎牙防盗链与短效签名过期 (403 Forbidden)
+- **痛点**：虎牙 CDN 直播流的 HLS/FLV 签名（`wsSecret` 与 `wsTime`）通常只有约 110 秒有效期。常规播放器直接播放时，在分片刷新或重连时因签名过期必报 `403 Forbidden`。
 - **解决方案**：
   - 内置**动态透明反向代理端点** (`/huya-source/{channelId}/stream.m3u8`)。
   - **扁平化 Master Playlist (Master Playlist Flattening)**：自动解析多码率主索引，直接提取并重签底层包含实际 TS 分片的 Media Playlist，杜绝播放器/FFmpeg 绕过代理。
@@ -24,7 +39,7 @@
   - 动态剥离 `#EXT-X-ENDLIST` 标记，避免推流短暂重连时播放器误判直播结束自动退出。
 
 ### 3. 🎯 零转码、超低资源消耗 (Zero-Transcoding)
-- 全程采用视频/音频流直通复制（`-c:v copy -c:a copy`），无 CPU/GPU 软硬重编码损耗，即便在软路由、NAS（如群晖、威联通、Unraid、飞牛 OS）等低功耗设备上亦可轻松并发多路 4K/原画推流。
+- 全程采用视频/音频流直通复制（`-c:v copy -c:a copy`），无 CPU/GPU 软硬重编码损耗，即便在软路由、NAS（群晖/威联通/Unraid/飞牛 OS）等低功耗设备上亦可轻松并发多路 4K/原画推流。
 
 ### 4. 📺 完美的 IPTV / Jellyfin 协议适配
 - 提供标准的 IPTV M3U 播放列表端点 (`http://<ip>:9898/jellyfin.m3u`)。
@@ -38,61 +53,98 @@
 
 ## 🛠️ 支持平台
 
-| 平台 | 状态 | 说明 |
-| :--- | :---: | :--- |
-| **虎牙直播 (Huya)** | 🟢 完美支持 | 支持全码率、动态反防盗链、自动重签 |
-| **斗鱼直播 (Douyu)** | 🟢 完美支持 | 支持房间号与短号解析 |
-| **哔哩哔哩 (Bilibili)** | 🟢 完美支持 | 支持原画、超清等多画质解析 |
+| 平台 | 状态 | 平台代号 (`Platform`) | 说明 |
+| :--- | :---: | :---: | :--- |
+| **虎牙直播** | 🟢 完美支持 | `huya` | 支持原画/全码率、动态反防盗链、自动重签 |
+| **斗鱼直播** | 🟢 完美支持 | `douyu` | 支持房间长号与短号解析 |
+| **哔哩哔哩** | 🟢 完美支持 | `bilibili` | 支持原画、超清等多画质解析 |
 
 ---
 
 ## 🏗️ 架构流程图
 
 ```text
-[虎牙/斗鱼/B站 CDN]
-        │
-        ▼ (平台 API 解析 & 动态签名计算)
-[HuyaStreamGetter 核心网关]
-        │
-        ├─► [内置透明反向代理] ──► 动态重签 HLS / 剥除 ENDLIST
-        │          │
-        │          ▼
-        ├─► [FFmpeg 守护引擎] ──► 极速切片 (Copy Mode, 2s/片, 零编解码)
-        │          │
-        │          ▼
-        └─► [Kestrel HTTP 服务 (9898端口)]
-                   │
-                   ├─► /jellyfin.m3u (标准 IPTV M3U 索引)
-                   └─► /live/{channelId}/stream.m3u8 (HLS 播放流)
-                           │
-                           ▼
-             [Jellyfin / Emby / IPTV / VLC]
+[虎牙 / 斗鱼 / B站 CDN 直播源]
+             │
+             ▼ (平台 API 解析 & 动态签名计算)
+[HuyaStreamGetter 中继网关 (Windows / NAS)]
+             │
+             ├─► [内置透明反向代理] ──► 动态重签 HLS / 扁平化主索引 / 剥除 ENDLIST
+             │          │
+             │          ▼
+             ├─► [FFmpeg 守护引擎] ──► 极速切片 (Copy Mode, 2s/片, 零编解码)
+             │          │
+             │          ▼
+             └─► [Kestrel HTTP 服务 (默认端口 9898)]
+                        │
+                        ├─► /jellyfin.m3u (标准 IPTV M3U 电视索引)
+                        └─► /live/{channelId}/stream.m3u8 (HLS 播放流)
+                                │
+                                ▼
+       [极米 H1 / Android 电视盒子 / Apple TV / PC]
+       (运行 Jellyfin / Emby / Kodi / TiviMate / APTV)
 ```
 
 ---
 
-## 🚀 快速上手
+## 🚀 使用方法说明
 
-### 前置要求
-1. 安装 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) 或更高版本。
-2. 下载 [FFmpeg](https://ffmpeg.org/download.html)，将 `ffmpeg.exe` 放置在程序根目录（或构建输出的运行目录中）。
+### 步骤 1：准备运行环境
+1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。
+2. 下载 [FFmpeg](https://ffmpeg.org/download.html)，将 `ffmpeg.exe` 放入程序根目录（或生成目录中）。
 
-### 1. 克隆项目
+### 步骤 2：配置直播频道与 Cookie
+1. 复制配置文件模板：
+   ```bash
+   cp config.example.json config.json
+   ```
+2. 编辑 `config.json` 添加您想观看的主播或赛事直播间（详细参数见后文）。
+
+### 步骤 3：启动服务
+在项目目录下执行：
 ```bash
-git clone https://github.com/<your-username>/HuyaStreamGetter.git
-cd HuyaStreamGetter
+dotnet run
 ```
+或直接双击运行发布后的 `HuyaStreamGetter.exe`。终端窗口将展示控制面板与各频道实时状态。
 
-### 2. 配置文件
-复制一份配置文件：
-```bash
-cp config.example.json config.json
-```
-根据需求编辑 `config.json`：
+> 💡 **提示**：如果局域网其他设备无法访问，请确保在 Windows 防火墙中放行 `9898` 端口（入站规则）。
+
+### 步骤 4：在客户端中挂载播放
+
+#### 方式 A：接入 Jellyfin / Emby（推荐，极米 H1 / 电视盒端）
+1. 登录 Jellyfin / Emby 管理后台。
+2. 进入 **控制台 -> 电视 (Live TV)** -> **电视源 (Tuner Devices)**。
+3. 点击 **添加**，类型选择 **M3U 播放列表 (M3U Tuner)**。
+4. **文件或 URL** 填写：
+   ```text
+   http://<运行主机的局域网IP>:9898/jellyfin.m3u
+   ```
+5. 保存后，在电视端（如极米 H1 上的 Jellyfin 客户端）打开 **“直播电视” (Live TV)**，即可看到所有频道并流畅播放！
+
+#### 方式 B：接入通用 IPTV 播放器 (TiviMate / APTV / PotPlayer / VLC)
+- 直接在播放器中添加订阅源 URL：
+  ```text
+  http://<运行主机的局域网IP>:9898/jellyfin.m3u
+  ```
+- 或单独播放单个频道：
+  ```text
+  http://<运行主机的局域网IP>:9898/live/<频道Id>/stream.m3u8
+  ```
+
+---
+
+## ⚙️ 配置文件详细说明 (`config.json`)
+
+配置文件分为两大部分：**CookieProfiles（凭据池）** 与 **Channels（频道列表）**。
+
+### 完整配置示例
+
 ```json
 {
   "CookieProfiles": {
-    "huya_main": "（可选：填入虎牙 Cookie 可观看最高原画码率）"
+    "huya_main": "guid=xxx; udb_guiddata=xxx; udb_biztoken=xxx; ...",
+    "douyu_main": "（可选：填入斗鱼网页版 Cookie）",
+    "bilibili_main": "（可选：填入 B 站网页版 Cookie）"
   },
   "Channels": [
     {
@@ -105,8 +157,17 @@ cp config.example.json config.json
       "Enable": true
     },
     {
-      "Id": "huya_streamer",
-      "Name": "虎牙-主播房间",
+      "Id": "douyu_dota2",
+      "Name": "斗鱼-DOTA2赛事",
+      "Platform": "douyu",
+      "Url": "https://www.douyu.com/9999",
+      "Quality": "OD",
+      "CookieProfileKey": "douyu_main",
+      "Enable": true
+    },
+    {
+      "Id": "huya_streamer_backup",
+      "Name": "虎牙-备用频道",
       "Platform": "huya",
       "Url": "https://www.huya.com/660004",
       "Quality": "OD",
@@ -117,33 +178,27 @@ cp config.example.json config.json
 }
 ```
 
-### 3. 构建与运行
-```bash
-dotnet run
-```
+### 字段说明表
 
-### 4. 接入 Jellyfin / Emby / IPTV
-1. 打开 Jellyfin 控制台 -> **电视 (Live TV)** -> **电视源 (Tuner Devices)**。
-2. 添加 **M3U 调谐器**：
-   - 文件或 URL：`http://<运行主机的局域网IP>:9898/jellyfin.m3u`
-3. 保存并刷新指南即可畅享流畅直播！
-
----
-
-## ⚙️ 配置说明
-
+#### 1. `CookieProfiles`（可选）
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `Id` | string | 频道唯一英文标识（用于 HLS 路由与目录命名） |
-| `Name` | string | 频道显示名称（M3U 中展示的电视频道名） |
-| `Platform` | string | 直播平台：`huya` / `douyu` / `bilibili` |
-| `Url` | string | 直播间完整网页 URL |
-| `Quality` | string | 画质等级：`OD`(原画) / `BD`(蓝光) / `HD`(超清) / `SD`(高清) |
-| `CookieProfileKey` | string | 对应的 Cookie 配置项 Key |
-| `Enable` | bool | `true` 开启推流并加入 M3U；`false` 禁用并自动关闭进程 |
+| `Key` (如 `huya_main`) | string | 自定义的 Cookie 配置名，供下方频道引用 |
+| `Value` | string | 从浏览器 F12 抓取的直播平台完整 Cookie 字符串（配置后可直接获取最高原画/蓝光 4K 码率） |
+
+#### 2. `Channels`（频道列表）
+| 字段 | 类型 | 必填 | 说明 |
+| :--- | :--- | :---: | :--- |
+| `Id` | string | 是 | 频道唯一英文字符串标识（用于 HLS 路由与缓存目录命名，如 `huya_eslcs`） |
+| `Name` | string | 是 | 频道显示名称（在 Jellyfin / IPTV 电视列表中展示的频道名） |
+| `Platform` | string | 是 | 直播平台代号：可选 `huya` (虎牙)、`douyu` (斗鱼)、`bilibili` (B站) |
+| `Url` | string | 是 | 直播间的完整网页 URL（支持房间号、靓号或个性域名） |
+| `Quality` | string | 否 | 画质偏好：`OD`(原画) / `BD`(蓝光) / `HD`(超清) / `SD`(高清)，默认 `OD` |
+| `CookieProfileKey` | string | 否 | 关联的 CookieProfile 键名（如 `huya_main`），留空或不填则使用免登录画质 |
+| `Enable` | bool | 否 | **频道开关**：`true` 正常拉流并导出到 M3U；`false` 禁用该频道（自动释放进程且不显示在列表中） |
 
 ---
 
 ## 📄 开源许可证
 
-本项目基于 [MIT 许可证](LICENSE) 开源。仅供个人技术研究、局域网家庭多媒体串流交流使用，严禁用于商业牟利。
+本项目基于 [MIT 许可证](LICENSE) 开源。仅供个人技术研究、局域网家庭多媒体串流与老旧设备复用交流，严禁用于任何商业营利用途。

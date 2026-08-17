@@ -1,13 +1,13 @@
 {
   "CookieProfiles": {
-    "huya_main": "（可选：在此粘贴虎牙网页版 Cookie，可观看原画或高码率流）",
-    "douyu_main": "（可选：在此粘贴斗鱼 Cookie）",
-    "bilibili_main": "（可选：在此粘贴 B站 Cookie）"
+    "huya_main": "（可选：在此粘贴虎牙网页版 Cookie，可直接获取最高原画/蓝光 4K 码率）",
+    "douyu_main": "（可选：在此粘贴斗鱼网页版 Cookie）",
+    "bilibili_main": "（可选：在此粘贴 B 站网页版 Cookie）"
   },
   "Channels": [
     {
-      "Id": "huya_example_1",
-      "Name": "虎牙-示例频道1",
+      "Id": "huya_eslcs",
+      "Name": "虎牙-CS赛事",
       "Platform": "huya",
       "Url": "https://www.huya.com/eslcs",
       "Quality": "OD",
@@ -15,8 +15,17 @@
       "Enable": true
     },
     {
-      "Id": "huya_example_2",
-      "Name": "虎牙-示例频道2",
+      "Id": "douyu_dota2",
+      "Name": "斗鱼-DOTA2赛事",
+      "Platform": "douyu",
+      "Url": "https://www.douyu.com/9999",
+      "Quality": "OD",
+      "CookieProfileKey": "douyu_main",
+      "Enable": true
+    },
+    {
+      "Id": "huya_streamer_backup",
+      "Name": "虎牙-备用频道",
       "Platform": "huya",
       "Url": "https://www.huya.com/660004",
       "Quality": "OD",
