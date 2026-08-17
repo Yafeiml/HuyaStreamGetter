@@ -63,77 +63,102 @@ namespace HuyaStreamGetter
         {
             try
             {
-                string roomId = url.Split('?')[0].TrimEnd('/').Split('/').Last();
-                if (string.IsNullOrEmpty(roomId)) return null;
+                string rawId = url.Split('?')[0].TrimEnd('/').Split('/').Last();
+                if (string.IsNullOrEmpty(rawId)) return null;
 
+                // 1. 获取真实房间号与开播状态
+                string realRoomId = rawId;
+                try
+                {
+                    var initReq = new HttpRequestMessage(HttpMethod.Get, $"https://api.live.bilibili.com/room/v1/Room/room_init?id={rawId}");
+                    initReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                    if (!string.IsNullOrEmpty(_cookies)) initReq.Headers.Add("Cookie", _cookies);
+                    
+                    var initRes = await _httpClient.SendAsync(initReq);
+                    if (initRes.IsSuccessStatusCode)
+                    {
+                        var initJson = JsonNode.Parse(await initRes.Content.ReadAsStringAsync());
+                        if (initJson?["code"]?.GetValue<int>() == 0)
+                        {
+                            int liveStatus = initJson["data"]?["live_status"]?.GetValue<int>() ?? 0;
+                            if (liveStatus == 0)
+                            {
+                                throw new Exception("Not Live (未开播)");
+                            }
+                            realRoomId = initJson["data"]?["room_id"]?.ToString() ?? rawId;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (ex.Message.Contains("Not Live")) throw;
+                }
+
+                // 2. 映射画质 QN (OD/BD 均请求 10000 原画 1080P60)
                 string qn = quality switch
                 {
                     "OD" => "10000",
-                    "BD" => "400",
-                    "UHD" => "250",
-                    "HD" => "150",
-                    "SD" => "80",
-                    "LD" => "80",
+                    "BD" => "10000",
+                    "UHD" => "400",
+                    "HD" => "400",
+                    "SD" => "250",
+                    "LD" => "150",
                     _ => "10000"
                 };
 
-                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.live.bilibili.com/room/v1/Room/playUrl?cid={roomId}&qn={qn}&platform=web");
-                request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36");
-                if (!string.IsNullOrEmpty(_cookies)) request.Headers.Add("Cookie", _cookies);
+                // 3. 请求现代 V2 播放流接口
+                var v2Req = new HttpRequestMessage(HttpMethod.Get, $"https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={realRoomId}&protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=0,1");
+                v2Req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                v2Req.Headers.Add("Referer", $"https://live.bilibili.com/{realRoomId}");
+                if (!string.IsNullOrEmpty(_cookies)) v2Req.Headers.Add("Cookie", _cookies);
 
-                var response = await _httpClient.SendAsync(request);
-                string jsonStr = await response.Content.ReadAsStringAsync();
-                var json = JsonNode.Parse(jsonStr);
-                
-                if (json?["code"]?.GetValue<int>() == 0)
+                var v2Resp = await _httpClient.SendAsync(v2Req);
+                var v2JsonStr = await v2Resp.Content.ReadAsStringAsync();
+                var v2Json = JsonNode.Parse(v2JsonStr);
+
+                if (v2Json?["data"]?["live_status"]?.GetValue<int>() == 0)
+                    throw new Exception("Not Live (未开播)");
+
+                int code = v2Json?["code"]?.GetValue<int>() ?? 0;
+                if (code == -101 || code == -400)
+                    throw new Exception("Cookie Invalid (Cookie失效或需登录)");
+
+                var streamArray = v2Json?["data"]?["playurl_info"]?["playurl"]?["stream"]?.AsArray();
+                if (streamArray != null && streamArray.Count > 0)
                 {
-                    var durlArray = json["data"]?["durl"]?.AsArray();
-                    if (durlArray != null && durlArray.Count > 0)
-                    {
-                        foreach (var item in durlArray)
-                        {
-                            string durl = item?["url"]?.GetValue<string>() ?? "";
-                            if (durl.Contains("d1--cn-gotcha")) return durl;
-                        }
-                        return durlArray.Last()?["url"]?.GetValue<string>();
-                    }
-                }
-                else
-                {
-                    var v2Req = new HttpRequestMessage(HttpMethod.Get, $"https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={roomId}&protocol=0,1&format=0,1,2&codec=0,1,2&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=0,1");
-                    v2Req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                    if (!string.IsNullOrEmpty(_cookies)) v2Req.Headers.Add("Cookie", _cookies);
-                    
-                    var v2Resp = await _httpClient.SendAsync(v2Req);
-                    var v2JsonStr = await v2Resp.Content.ReadAsStringAsync();
-                    var v2Json = JsonNode.Parse(v2JsonStr);
-                    
-                    if (v2Json?["data"]?["live_status"]?.GetValue<int>() == 0)
-                        throw new Exception("Not Live (未开播)");
+                    // 优先选择 http_stream (FLV) 或 http_hls
+                    var selectedStream = streamArray.FirstOrDefault(s => s?["protocol_name"]?.GetValue<string>() == "http_stream") 
+                                         ?? streamArray[0];
 
-                    int code = v2Json?["code"]?.GetValue<int>() ?? 0;
-                    if (code == -101 || code == -400)
-                        throw new Exception("Cookie Invalid (Cookie失效或需登录)");
-
-                    var streamArray = v2Json?["data"]?["playurl_info"]?["playurl"]?["stream"]?.AsArray();
-                    if (streamArray != null && streamArray.Count > 0)
+                    var formatArray = selectedStream?["format"]?.AsArray();
+                    if (formatArray != null && formatArray.Count > 0)
                     {
-                        var formatArray = streamArray[0]?["format"]?.AsArray();
-                        var codecArray = formatArray?[0]?["codec"]?.AsArray();
+                        var selectedFormat = formatArray.FirstOrDefault(f => f?["format_name"]?.GetValue<string>() == "flv") 
+                                             ?? formatArray[0];
+
+                        var codecArray = selectedFormat?["codec"]?.AsArray();
                         if (codecArray != null && codecArray.Count > 0)
                         {
-                            var firstCodec = codecArray[0];
-                            string baseUrl = firstCodec?["base_url"]?.GetValue<string>() ?? "";
-                            var urlInfoArray = firstCodec?["url_info"]?.AsArray();
+                            // 优先 AVC (h264) 格式，兼容性最好且码率满速
+                            var selectedCodec = codecArray.FirstOrDefault(c => c?["codec_name"]?.GetValue<string>() == "avc") 
+                                                ?? codecArray[0];
+
+                            string baseUrl = selectedCodec?["base_url"]?.GetValue<string>() ?? "";
+                            var urlInfoArray = selectedCodec?["url_info"]?.AsArray();
                             if (urlInfoArray != null && urlInfoArray.Count > 0)
                             {
-                                string host = urlInfoArray[0]?["host"]?.GetValue<string>() ?? "";
-                                string extra = urlInfoArray[0]?["extra"]?.GetValue<string>() ?? "";
+                                // 优先选 gotcha 节点
+                                var selectedUrlInfo = urlInfoArray.FirstOrDefault(u => u?["host"]?.GetValue<string>()?.Contains("gotcha") == true)
+                                                      ?? urlInfoArray[0];
+
+                                string host = selectedUrlInfo?["host"]?.GetValue<string>() ?? "";
+                                string extra = selectedUrlInfo?["extra"]?.GetValue<string>() ?? "";
                                 return host + baseUrl + extra;
                             }
                         }
                     }
                 }
+
                 throw new Exception("Not Live (未开播)");
             }
             catch (Exception ex)

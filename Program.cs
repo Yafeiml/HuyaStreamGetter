@@ -1207,6 +1207,7 @@ public class StreamManagerService : BackgroundService
         string arguments = $"-fflags +genpts+discardcorrupt -err_detect ignore_err "
             + $"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -reconnect_on_network_error 1 "
             + $"-rw_timeout 15000000 "
+            + $"-headers \"Referer: https://live.bilibili.com/\r\n\" "
             + $"-user_agent \"{userAgent}\" "
             + $"-i \"{sourceStreamUrl}\" "
             + $"-c:v copy -c:a copy -sn -f hls -hls_time 2 -hls_list_size 10 -hls_allow_cache 0 "
