@@ -4,17 +4,16 @@
 # ==========================================================
 
 # 1. Build Stage
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
-ARG TARGETARCH
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy project file and restore dependencies
 COPY ["HuyaStreamGetter.csproj", "./"]
-RUN dotnet restore "HuyaStreamGetter.csproj" -a $TARGETARCH
+RUN dotnet restore "HuyaStreamGetter.csproj"
 
 # Copy source code and wwwroot
 COPY . .
-RUN dotnet publish "HuyaStreamGetter.csproj" -c Release -a $TARGETARCH -o /app/publish /p:UseAppHost=false
+RUN dotnet publish "HuyaStreamGetter.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
 # 2. Runtime Stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
