@@ -84,6 +84,122 @@ app.UseStaticFiles(new StaticFileOptions
 // RESTful Management APIs
 // -------------------------------------------------------------
 
+// 0. 自动获取直播间主播名称与推荐 ID
+app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
+{
+    if (string.IsNullOrWhiteSpace(url))
+        return Results.BadRequest(new { error = "请输入直播间链接或房间号" });
+
+    platform = (platform ?? "huya").ToLower();
+    string cleanUrl = url.Trim();
+
+    try
+    {
+        string? name = null;
+        string? suggestedId = null;
+        string? title = null;
+
+        if (platform == "huya")
+        {
+            string roomId = cleanUrl.Split('?')[0].TrimEnd('/').Split('/').Last();
+            suggestedId = $"huya_{roomId.ToLower()}";
+
+            string pageUrl = cleanUrl.StartsWith("http") ? cleanUrl : $"https://www.huya.com/{roomId}";
+            using var req = new HttpRequestMessage(HttpMethod.Get, pageUrl);
+            req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+            
+            using var resp = await Globals.HttpClient.SendAsync(req);
+            if (resp.IsSuccessStatusCode)
+            {
+                string html = await resp.Content.ReadAsStringAsync();
+                var hostMatch = System.Text.RegularExpressions.Regex.Match(html, @"host-name"" title=""([^""]+)""");
+                var titleMatch = System.Text.RegularExpressions.Regex.Match(html, @"host-title"" title=""([^""]+)""");
+                
+                string hostName = hostMatch.Success ? hostMatch.Groups[1].Value.Trim() : "";
+                title = titleMatch.Success ? titleMatch.Groups[1].Value.Trim() : "";
+                
+                if (!string.IsNullOrEmpty(hostName))
+                {
+                    name = $"虎牙-{hostName}";
+                }
+                else
+                {
+                    name = $"虎牙-{roomId}";
+                }
+            }
+        }
+        else if (platform == "douyu")
+        {
+            string roomId = cleanUrl.Split('?')[0].TrimEnd('/').Split('/').Last();
+            var match = System.Text.RegularExpressions.Regex.Match(cleanUrl, @"\d+");
+            if (match.Success) roomId = match.Value;
+
+            suggestedId = $"douyu_{roomId}";
+            string apiUrl = $"http://open.douyucdn.cn/api/RoomApi/room/{roomId}";
+            using var req = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+            req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+            
+            using var resp = await Globals.HttpClient.SendAsync(req);
+            if (resp.IsSuccessStatusCode)
+            {
+                var jsonStr = await resp.Content.ReadAsStringAsync();
+                var json = System.Text.Json.Nodes.JsonNode.Parse(jsonStr);
+                string owner = json?["data"]?["owner_name"]?.GetValue<string>() ?? "";
+                title = json?["data"]?["room_name"]?.GetValue<string>() ?? "";
+                
+                name = !string.IsNullOrEmpty(owner) ? $"斗鱼-{owner}" : $"斗鱼-{roomId}";
+            }
+        }
+        else if (platform == "bilibili")
+        {
+            string roomId = cleanUrl.Split('?')[0].TrimEnd('/').Split('/').Last();
+            suggestedId = $"bilibili_{roomId}";
+
+            string userApi = $"https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid={roomId}";
+            string roomApi = $"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={roomId}";
+            
+            using var uReq = new HttpRequestMessage(HttpMethod.Get, userApi);
+            uReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+            using var uResp = await Globals.HttpClient.SendAsync(uReq);
+
+            string anchorName = "";
+            if (uResp.IsSuccessStatusCode)
+            {
+                var uJson = System.Text.Json.Nodes.JsonNode.Parse(await uResp.Content.ReadAsStringAsync());
+                anchorName = uJson?["data"]?["info"]?["uname"]?.GetValue<string>() ?? "";
+            }
+
+            using var rReq = new HttpRequestMessage(HttpMethod.Get, roomApi);
+            rReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+            using var rResp = await Globals.HttpClient.SendAsync(rReq);
+            if (rResp.IsSuccessStatusCode)
+            {
+                var rJson = System.Text.Json.Nodes.JsonNode.Parse(await rResp.Content.ReadAsStringAsync());
+                title = rJson?["data"]?["title"]?.GetValue<string>() ?? "";
+            }
+
+            name = !string.IsNullOrEmpty(anchorName) ? $"B站-{anchorName}" : $"B站-{roomId}";
+        }
+
+        if (string.IsNullOrEmpty(name))
+        {
+            return Results.Ok(new { success = false, message = "未解析到主播名称，请手动输入" });
+        }
+
+        return Results.Json(new
+        {
+            success = true,
+            name,
+            suggestedId,
+            title
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new { success = false, message = $"自动获取失败: {ex.Message}" });
+    }
+});
+
 // 1. 获取全局系统状态与频道状态大盘
 app.MapGet("/api/status", () =>
 {

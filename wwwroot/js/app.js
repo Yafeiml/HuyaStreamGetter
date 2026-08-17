@@ -328,6 +328,61 @@ function onPlatformChange() {
     else if (platform === 'bilibili') urlInput.placeholder = 'https://live.bilibili.com/6 或房间号';
 }
 
+async function autoFetchChannelInfo(silent = false) {
+    const url = document.getElementById('channel-url')?.value.trim();
+    const platform = document.getElementById('channel-platform')?.value;
+    const nameInput = document.getElementById('channel-name');
+    const idInput = document.getElementById('channel-id');
+    const btn = document.getElementById('btn-auto-fetch');
+
+    if (!url) {
+        if (!silent) showToast('请先输入直播间链接或房间号', 'error');
+        return;
+    }
+
+    if (btn) {
+        btn.innerText = '⏳ 正在识别...';
+        btn.disabled = true;
+    }
+
+    try {
+        const res = await fetch(`/api/channels/fetch-info?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(url)}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (data.success) {
+                if (nameInput) {
+                    nameInput.value = data.name;
+                    nameInput.classList.add('highlight-flash');
+                    setTimeout(() => nameInput.classList.remove('highlight-flash'), 1000);
+                }
+                if (idInput && !idInput.disabled && (!idInput.value || !appState.editingChannelId)) {
+                    idInput.value = data.suggestedId;
+                    idInput.classList.add('highlight-flash');
+                    setTimeout(() => idInput.classList.remove('highlight-flash'), 1000);
+                }
+                showToast(`已识别：${data.name}`, 'success');
+            } else if (!silent) {
+                showToast(data.message || '未获取到主播信息，可手动填写', 'error');
+            }
+        }
+    } catch (err) {
+        if (!silent) showToast('识别失败: ' + err.message, 'error');
+    } finally {
+        if (btn) {
+            btn.innerText = '✨ 自动识别名称与ID';
+            btn.disabled = false;
+        }
+    }
+}
+
+function onUrlBlur() {
+    const nameInput = document.getElementById('channel-name');
+    // 如果名称输入框为空，失焦时自动进行一次静默识别填充
+    if (nameInput && !nameInput.value.trim()) {
+        autoFetchChannelInfo(true);
+    }
+}
+
 async function saveChannel(event) {
     event.preventDefault();
 
