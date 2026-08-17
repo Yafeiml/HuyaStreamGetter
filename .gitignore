@@ -6,6 +6,7 @@ obj/
 *.suo
 *.userosscache
 *.sln.docstates
+dist/
 
 ## Runtime Generated Files
 hls_stream/
