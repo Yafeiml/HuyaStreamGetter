@@ -541,15 +541,40 @@ public class StreamManagerService : BackgroundService
 {
     private const int HEALTH_CHECK_SECONDS = 30;
     private const int STALE_THRESHOLD_SECONDS = 90;
-    private static readonly string FFMPEG_EXE_PATH = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
+    private static readonly string? FFMPEG_EXE_PATH = ResolveFfmpegPath();
     
     private readonly ConcurrentDictionary<string, Process> _ffmpegProcesses = new();
 
+    private static string? ResolveFfmpegPath()
+    {
+        // 1. 优先检查当前程序同目录下的 ffmpeg.exe (或 Linux/macOS 下的 ffmpeg)
+        string exeName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        string localPath = Path.Combine(AppContext.BaseDirectory, exeName);
+        if (File.Exists(localPath)) return localPath;
+
+        // 2. 检查系统环境变量 PATH
+        string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                string fullPath = Path.Combine(dir.Trim(), exeName);
+                if (File.Exists(fullPath)) return fullPath;
+            }
+            catch { }
+        }
+
+        return null;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!File.Exists(FFMPEG_EXE_PATH))
+        if (string.IsNullOrEmpty(FFMPEG_EXE_PATH) || !File.Exists(FFMPEG_EXE_PATH))
         {
-            Globals.UpdateStatus(Globals.ChannelStatuses.First().Id, $"错误：未找到 {FFMPEG_EXE_PATH}", ConsoleColor.Red);
+            string err = "错误：未找到 FFmpeg！请将 ffmpeg.exe 放入程序同目录，或安装 FFmpeg 并加入系统 PATH 环境变量。";
+            if (Globals.ChannelStatuses.Count > 0)
+                Globals.UpdateStatus(Globals.ChannelStatuses.First().Id, err, ConsoleColor.Red);
+            Console.WriteLine($"\n[FFmpeg缺失] {err}\n");
             return;
         }
 

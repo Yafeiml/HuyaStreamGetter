@@ -90,8 +90,11 @@
 ## 🚀 使用方法说明
 
 ### 步骤 1：准备运行环境
-1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。
-2. 下载 [FFmpeg](https://ffmpeg.org/download.html)，将 `ffmpeg.exe` 放入程序根目录（或生成目录中）。
+1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（如果下载的是独立免安装版则无需安装 .NET）。
+2. **准备 FFmpeg**（支持以下任选一种方式）：
+   - **方式 1（最简单）**：下载 [FFmpeg 官方包](https://ffmpeg.org/download.html)，将 `ffmpeg.exe` 直接解压放入本程序的同级目录中。
+   - **方式 2（环境变量）**：如果系统中已安装过 FFmpeg，本程序会**自动扫描系统 `PATH` 环境变量**并调用，无需额外复制。
+   - **方式 3（Windows 终端一行命令安装）**：在终端运行 `winget install Gyan.FFmpeg` 即可全自动安装。
 
 ### 步骤 2：配置直播频道与 Cookie
 1. 复制配置文件模板：
