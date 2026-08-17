@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   huya-stream-gateway:
     # 支持本地自动构建，或直接拉取发布的镜像
