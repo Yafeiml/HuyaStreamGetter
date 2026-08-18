@@ -1,5 +1,5 @@
 // ==========================================================
-// HuyaStreamGateway - Web Management Controller
+// LiveStreamGateway - Web Management Controller
 // ==========================================================
 
 let appState = {

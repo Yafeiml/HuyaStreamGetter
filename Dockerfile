@@ -1,5 +1,5 @@
 # ==========================================================
-# HuyaStreamGateway Multi-Stage Dockerfile (.NET 10 + FFmpeg)
+# LiveStreamGateway Multi-Stage Dockerfile (.NET 10 + FFmpeg)
 # Supports: linux/amd64, linux/arm64
 # ==========================================================
 
@@ -8,12 +8,12 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy project file and restore dependencies
-COPY ["HuyaStreamGetter.csproj", "./"]
-RUN dotnet restore "HuyaStreamGetter.csproj"
+COPY ["LiveStreamGateway.csproj", "./"]
+RUN dotnet restore "LiveStreamGateway.csproj"
 
 # Copy source code and wwwroot
 COPY . .
-RUN dotnet publish "HuyaStreamGetter.csproj" -c Release -o /app/publish /p:UseAppHost=false
+RUN dotnet publish "LiveStreamGateway.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
 # 2. Runtime Stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
@@ -25,7 +25,7 @@ RUN apt-get update && \
         ffmpeg \
         ca-certificates \
         tzdata && \
-    rm -rf /var/lib/apt/lists/*
+        rm -rf /var/lib/apt/lists/*
 
 # Set default timezone to Asia/Shanghai
 ENV TZ=Asia/Shanghai
@@ -41,4 +41,4 @@ RUN mkdir -p /app/hls_stream
 EXPOSE 9898
 
 # Start the gateway
-ENTRYPOINT ["dotnet", "HuyaStreamGetter.dll"]
+ENTRYPOINT ["dotnet", "LiveStreamGateway.dll"]

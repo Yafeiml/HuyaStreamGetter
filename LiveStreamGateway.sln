@@ -1,9 +1,8 @@
-﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36623.8 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HuyaStreamGetter", "HuyaStreamGetter.csproj", "{FC056F09-CBCC-7878-7319-3F0F05615F89}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveStreamGateway", "LiveStreamGateway.csproj", "{FC056F09-CBCC-7878-7319-3F0F05615F89}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

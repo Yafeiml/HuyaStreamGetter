@@ -12,13 +12,13 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
-using HuyaStreamGetter;
+using LiveStreamGateway;
 
 // -------------------------------------------------------------
 // Top-Level Application Setup
 // -------------------------------------------------------------
 try {
-    Console.Title = "HuyaStreamGetter - .NET 10";
+    Console.Title = "LiveStreamGateway - .NET 10";
     Console.CursorVisible = false;
     Console.OutputEncoding = Encoding.UTF8;
 } catch { }

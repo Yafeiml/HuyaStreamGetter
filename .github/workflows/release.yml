@@ -60,7 +60,7 @@ jobs:
       - name: Publish Single-File Executable
         shell: pwsh
         run: |
-          dotnet publish HuyaStreamGetter.csproj -c Release -r win-x64 `
+          dotnet publish LiveStreamGateway.csproj -c Release -r win-x64 `
             --self-contained true `
             -p:PublishSingleFile=true `
             -p:IncludeNativeLibrariesForSelfExtract=true `
@@ -86,9 +86,9 @@ jobs:
           
           # Create zip
           $ver = "${{ steps.get_version.outputs.VERSION }}"
-          Compress-Archive -Path ./out/* -DestinationPath "./package/HuyaStreamGetter-$ver-win-x64.zip" -Force
+          Compress-Archive -Path ./out/* -DestinationPath "./package/LiveStreamGateway-$ver-win-x64.zip" -Force
           
-          $zipSize = [math]::Round((Get-Item "./package/HuyaStreamGetter-$ver-win-x64.zip").Length/1MB, 1)
+          $zipSize = [math]::Round((Get-Item "./package/LiveStreamGateway-$ver-win-x64.zip").Length/1MB, 1)
           Write-Host "Package size: $zipSize MB"
 
       - name: Create GitHub Release

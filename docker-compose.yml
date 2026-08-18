@@ -1,11 +1,11 @@
 services:
-  huya-stream-gateway:
+  live-stream-gateway:
     # 支持本地自动构建，或直接拉取发布的镜像
     build:
       context: .
       dockerfile: Dockerfile
-    image: yafeiml/huya-stream-getter:latest
-    container_name: huya-stream-gateway
+    image: yafeiml/livestreamgateway:latest
+    container_name: live-stream-gateway
     restart: unless-stopped
     ports:
       - "9898:9898"

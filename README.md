@@ -1,10 +1,10 @@
-# HuyaStreamGetter / LiveStreamGateway 🚀
+# LiveStreamGateway 🚀
 
 > 基于 **.NET 10** 与 **FFmpeg** 构建的高性能多平台直播流中继网关与 IPTV (M3U) 转换服务。  
 > 专为 **Jellyfin / Emby / Kodi / VLC / IPTV 客户端** 打造，彻底解决各大直播平台防盗链签名过期、断流、卡顿及直播边缘漂移等痛点问题。
 
 <p align="center">
-  <img src="docs/images/dashboard.png" alt="HuyaStreamGateway Web Dashboard" width="850">
+  <img src="docs/images/dashboard.png" alt="LiveStreamGateway Web Dashboard" width="850">
 </p>
 
 ---
@@ -15,11 +15,11 @@
 许多家庭的老旧显示设备（例如 **极米 H1 投影仪**、老款智能电视、旧 Android 电视盒子等），其硬件解码芯片和运存配置较低。而如今各大直播平台（虎牙、斗鱼、B站）的官方 TV 版客户端越发臃肿：
 - ❌ **客户端臃肿**：充斥着复杂的 UI、礼物动画、弹幕渲染、后台广告与高占用逻辑。
 - ❌ **老设备频繁卡死**：在老旧设备上直接运行官方客户端，极易引发**内存溢出、严重卡顿、发热掉帧，甚至直接闪退与系统卡死**。
-- ❌ **纯净流难以直接播放**：各大平台的直播流（尤其是虎牙）带有严苛的防盗链与短效签名机制（~110秒自动过期），直接把原始链接填进播放器会频繁出现 403 Forbidden 断流。
+- ❌ **纯净流难以直接播放**：各大平台的直播流带有严苛的防盗链与短效签名机制（~110秒自动过期），直接把原始链接填进播放器会频繁出现 403 Forbidden 断流。
 
 ### 🎯 架构解耦思想
 本项目采用 **“边缘中转 + 轻量渲染”** 的解耦架构：
-1. **中转服务（Windows / 软路由 / NAS）**：在局域网主机上运行 `HuyaStreamGateway`，负责处理最繁琐的 **直播流解析、动态反防盗链重签名、FFmpeg 守护切片与 M3U 网关分发**。
+1. **中转服务（Windows / 软路由 / NAS）**：在局域网主机上运行 `LiveStreamGateway`，负责处理最繁琐的 **直播流解析、动态反防盗链重签名、FFmpeg 守护切片与 M3U 网关分发**。
 2. **终端播放（极米 H1 / 电视盒子）**：老旧设备上仅需安装极其轻量、纯粹的播放客户端（如 **Jellyfin TV / Emby / Kodi / TiviMate / APTV**），老设备只需负责硬件解码播放纯净流。
 
 > **🎉 实测效果**：极米 H1 等老旧设备彻底摆脱客户端崩溃与卡顿，秒开直播，畅享丝滑稳定的 1080P/4K 原画赛事与主播流！
@@ -77,7 +77,7 @@
 [虎牙 / 斗鱼 / B站 CDN 直播源]
              │
              ▼ (平台 API 解析 & 动态签名计算)
-[HuyaStreamGetter 中继网关 (Windows / NAS)]
+[LiveStreamGateway 中继网关 (Windows / NAS)]
              │
              ├─► [内置透明反向代理] ──► 动态重签 HLS / 扁平化主索引 / 剥除 ENDLIST
              │          │
@@ -125,9 +125,9 @@
 version: '3.8'
 
 services:
-  huya-stream-gateway:
-    image: ghcr.io/yafeiml/huyastreamgetter:latest
-    container_name: huya-stream-gateway
+  live-stream-gateway:
+    image: ghcr.io/yafeiml/livestreamgateway:latest
+    container_name: live-stream-gateway
     restart: unless-stopped
     ports:
       - "9898:9898"
@@ -144,7 +144,7 @@ services:
 在同级目录下执行启动：
 ```bash
 # 1. 复制一份初始配置文件（若已有可跳过）
-curl -sSL https://raw.githubusercontent.com/Yafeiml/HuyaStreamGetter/main/config.example.json -o config.json
+curl -sSL https://raw.githubusercontent.com/Yafeiml/LiveStreamGateway/main/config.example.json -o config.json
 
 # 2. 启动容器
 docker compose up -d
@@ -154,13 +154,13 @@ docker compose up -d
 
 ```bash
 docker run -d \
-  --name huya-stream-gateway \
+  --name live-stream-gateway \
   --restart unless-stopped \
   -p 9898:9898 \
   -v $(pwd)/config.json:/app/config.json \
   --tmpfs /app/hls_stream:size=128M \
   -e TZ=Asia/Shanghai \
-  ghcr.io/yafeiml/huyastreamgetter:latest
+  ghcr.io/yafeiml/livestreamgateway:latest
 ```
 
 启动完成后，直接访问 `http://<NAS的IP>:9898` 即可通过 Web 界面可视化管理！
@@ -170,7 +170,7 @@ docker run -d \
 ## 🚀 本地 Windows / 源码使用说明
 
 ### 步骤 1：准备运行环境
-1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（如果从 [Releases](https://github.com/Yafeiml/HuyaStreamGetter/releases) 下载独立版则无需安装 .NET，解压即跑）。
+1. 确保安装了 [.NET 10 Runtime / SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（如果从 [Releases](https://github.com/Yafeiml/LiveStreamGateway/releases) 下载独立版则无需安装 .NET，解压即跑）。
 2. **准备 FFmpeg**（支持以下任选一种方式）：
    - **方式 1（最简单）**：从 Releases 直接下载打包好的完整压缩包（已内置官方精简版 `ffmpeg.exe`）。
    - **方式 2（环境变量）**：程序会**自动扫描系统 `PATH` 环境变量**，已有 FFmpeg 的电脑无需额外配置。
@@ -181,7 +181,7 @@ docker run -d \
 ```bash
 dotnet run
 ```
-或直接双击运行下载的 `HuyaStreamGetter.exe`。
+或直接双击运行下载的 `LiveStreamGateway.exe`。
 
 ### 步骤 3：在客户端中挂载播放
 
@@ -216,9 +216,9 @@ dotnet run
 ```json
 {
   "CookieProfiles": {
-    "huya_main": "guid=xxx; udb_guiddata=xxx; udb_biztoken=xxx; ...",
-    "douyu_main": "（可选：填入斗鱼网页版 Cookie）",
-    "bilibili_main": "（可选：填入 B 站网页版 Cookie）"
+    "huya": "guid=xxx; udb_guiddata=xxx; udb_biztoken=xxx; ...",
+    "douyu": "（可选：填入斗鱼网页版 Cookie）",
+    "bilibili": "（可选：填入 B 站网页版 Cookie）"
   },
   "Channels": [
     {
@@ -227,7 +227,7 @@ dotnet run
       "Platform": "huya",
       "Url": "https://www.huya.com/eslcs",
       "Quality": "OD",
-      "CookieProfileKey": "huya_main",
+      "CookieProfileKey": "huya",
       "Enable": true
     },
     {
@@ -236,7 +236,7 @@ dotnet run
       "Platform": "douyu",
       "Url": "https://www.douyu.com/9999",
       "Quality": "OD",
-      "CookieProfileKey": "douyu_main",
+      "CookieProfileKey": "douyu",
       "Enable": true
     },
     {
@@ -245,7 +245,7 @@ dotnet run
       "Platform": "huya",
       "Url": "https://www.huya.com/660004",
       "Quality": "OD",
-      "CookieProfileKey": "huya_main",
+      "CookieProfileKey": "huya",
       "Enable": false
     }
   ]
@@ -257,7 +257,7 @@ dotnet run
 #### 1. `CookieProfiles`（可选）
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `Key` (如 `huya_main`) | string | 自定义的 Cookie 配置名，供下方频道引用 |
+| `Key` (如 `huya`) | string | 平台代号（`huya` / `douyu` / `bilibili`） |
 | `Value` | string | 从浏览器 F12 抓取的直播平台完整 Cookie 字符串（配置后可直接获取最高原画/蓝光 4K 码率） |
 
 #### 2. `Channels`（频道列表）
@@ -268,7 +268,7 @@ dotnet run
 | `Platform` | string | 是 | 直播平台代号：可选 `huya` (虎牙)、`douyu` (斗鱼)、`bilibili` (B站) |
 | `Url` | string | 是 | 直播间的完整网页 URL（支持房间号、靓号或个性域名） |
 | `Quality` | string | 否 | 画质偏好：`OD`(原画) / `BD`(蓝光) / `HD`(超清) / `SD`(高清)，默认 `OD` |
-| `CookieProfileKey` | string | 否 | 关联的 CookieProfile 键名（如 `huya_main`），留空或不填则使用免登录画质 |
+| `CookieProfileKey` | string | 否 | 关联的 CookieProfile 键名（如 `huya`），留空或不填则使用免登录画质 |
 | `Enable` | bool | 否 | **频道开关**：`true` 正常拉流并导出到 M3U；`false` 禁用该频道（自动释放进程且不显示在列表中） |
 
 ---

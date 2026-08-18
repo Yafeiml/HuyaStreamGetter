@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
 
-namespace HuyaStreamGetter
+namespace LiveStreamGateway
 {
     public abstract class BaseExtractor
     {

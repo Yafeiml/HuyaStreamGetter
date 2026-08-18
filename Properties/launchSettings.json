@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "HuyaStreamGetter": {
+    "LiveStreamGateway": {
       "commandName": "Project",
       "launchBrowser": true,
       "environmentVariables": {
