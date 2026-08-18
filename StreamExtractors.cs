@@ -19,13 +19,28 @@ namespace HuyaStreamGetter
 
         protected BaseExtractor(string? cookies)
         {
-            _cookies = cookies ?? "";
+            _cookies = SanitizeAsciiHeader(cookies);
             var handler = new HttpClientHandler
             {
                 UseCookies = false
             };
             _httpClient = new HttpClient(handler);
             _httpClient.Timeout = TimeSpan.FromSeconds(10);
+        }
+
+        public static string SanitizeAsciiHeader(string? val)
+        {
+            if (string.IsNullOrEmpty(val)) return "";
+            var sb = new StringBuilder(val.Length);
+            foreach (char c in val)
+            {
+                // Only allow standard printable ASCII characters (0x20 to 0x7E) for HTTP headers
+                if (c >= 0x20 && c <= 0x7E)
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
         }
 
         public abstract Task<string?> GetStreamUrlAsync(string url, string quality);
@@ -71,8 +86,8 @@ namespace HuyaStreamGetter
                 try
                 {
                     var initReq = new HttpRequestMessage(HttpMethod.Get, $"https://api.live.bilibili.com/room/v1/Room/room_init?id={rawId}");
-                    initReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
-                    if (!string.IsNullOrEmpty(_cookies)) initReq.Headers.Add("Cookie", _cookies);
+                    initReq.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                    if (!string.IsNullOrEmpty(_cookies)) initReq.Headers.TryAddWithoutValidation("Cookie", _cookies);
                     
                     var initRes = await _httpClient.SendAsync(initReq);
                     if (initRes.IsSuccessStatusCode)
@@ -108,9 +123,9 @@ namespace HuyaStreamGetter
 
                 // 3. 请求现代 V2 播放流接口
                 var v2Req = new HttpRequestMessage(HttpMethod.Get, $"https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={realRoomId}&protocol=0,1&format=0,1,2&codec=0,1&qn={qn}&platform=web&ptype=8&dolby=5&panorama=1&hdr_type=0,1");
-                v2Req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
-                v2Req.Headers.Add("Referer", $"https://live.bilibili.com/{realRoomId}");
-                if (!string.IsNullOrEmpty(_cookies)) v2Req.Headers.Add("Cookie", _cookies);
+                v2Req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                v2Req.Headers.TryAddWithoutValidation("Referer", $"https://live.bilibili.com/{realRoomId}");
+                if (!string.IsNullOrEmpty(_cookies)) v2Req.Headers.TryAddWithoutValidation("Cookie", _cookies);
 
                 var v2Resp = await _httpClient.SendAsync(v2Req);
                 var v2JsonStr = await v2Resp.Content.ReadAsStringAsync();
@@ -190,8 +205,8 @@ namespace HuyaStreamGetter
                 {
                     string path = url.Split(new[] { "douyu.com/" }, StringSplitOptions.None)[1].Split('?')[0].Split('/')[0];
                     var req = new HttpRequestMessage(HttpMethod.Get, $"https://m.douyu.com/{path}");
-                    req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
-                    if (!string.IsNullOrEmpty(_cookies)) req.Headers.Add("Cookie", _cookies);
+                    req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                    if (!string.IsNullOrEmpty(_cookies)) req.Headers.TryAddWithoutValidation("Cookie", _cookies);
                     
                     var res = await _httpClient.SendAsync(req);
                     var html = await res.Content.ReadAsStringAsync();
@@ -214,9 +229,9 @@ namespace HuyaStreamGetter
 
                 // 1. 获取动态加密密钥 (带 Cookie 鉴权)
                 var encReq = new HttpRequestMessage(HttpMethod.Get, $"https://www.douyu.com/wgapi/livenc/liveweb/websec/getEncryption?did=10000000000000000000000000001501");
-                encReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
-                encReq.Headers.Add("Referer", $"https://www.douyu.com/{roomId}");
-                if (!string.IsNullOrEmpty(_cookies)) encReq.Headers.Add("Cookie", _cookies);
+                encReq.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                encReq.Headers.TryAddWithoutValidation("Referer", $"https://www.douyu.com/{roomId}");
+                if (!string.IsNullOrEmpty(_cookies)) encReq.Headers.TryAddWithoutValidation("Cookie", _cookies);
                 
                 var encRes = await _httpClient.SendAsync(encReq);
                 var encJson = JsonNode.Parse(await encRes.Content.ReadAsStringAsync());
@@ -266,10 +281,10 @@ namespace HuyaStreamGetter
 
                 // 2. 请求播放地址 (带全量 Cookie，解锁原画2K60/4K与最高码率)
                 var playReq = new HttpRequestMessage(HttpMethod.Post, $"https://playweb.douyucdn.cn/lapi/live/getH5PlayV1/{roomId}");
-                playReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
-                playReq.Headers.Add("Origin", "https://www.douyu.com");
-                playReq.Headers.Add("Referer", $"https://www.douyu.com/{roomId}");
-                if (!string.IsNullOrEmpty(_cookies)) playReq.Headers.Add("Cookie", _cookies);
+                playReq.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                playReq.Headers.TryAddWithoutValidation("Origin", "https://www.douyu.com");
+                playReq.Headers.TryAddWithoutValidation("Referer", $"https://www.douyu.com/{roomId}");
+                if (!string.IsNullOrEmpty(_cookies)) playReq.Headers.TryAddWithoutValidation("Cookie", _cookies);
                 playReq.Content = new FormUrlEncodedContent(paramDict);
 
                 var playRes = await _httpClient.SendAsync(playReq);
@@ -389,8 +404,8 @@ namespace HuyaStreamGetter
                 if (roomId.Any(char.IsLetter))
                 {
                     var mReq = new HttpRequestMessage(HttpMethod.Get, url.StartsWith("http") ? url : $"https://m.huya.com/{roomId}");
-                    mReq.Headers.Add("User-Agent", "ios/7.830 (ios 17.0; ; iPhone 15)");
-                    if (!string.IsNullOrEmpty(_cookies)) mReq.Headers.Add("Cookie", _cookies);
+                    mReq.Headers.TryAddWithoutValidation("User-Agent", "ios/7.830 (ios 17.0; ; iPhone 15)");
+                    if (!string.IsNullOrEmpty(_cookies)) mReq.Headers.TryAddWithoutValidation("Cookie", _cookies);
                     
                     var mRes = await _httpClient.SendAsync(mReq);
                     var html = await mRes.Content.ReadAsStringAsync();
@@ -400,9 +415,9 @@ namespace HuyaStreamGetter
 
                 // 3. 请求虎牙移动端 Profile 缓存接口 (带 Cookie)
                 var req = new HttpRequestMessage(HttpMethod.Get, $"https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid={roomId}&showSecret=1");
-                req.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
-                req.Headers.Add("Referer", $"https://www.huya.com/{roomId}");
-                if (!string.IsNullOrEmpty(_cookies)) req.Headers.Add("Cookie", _cookies);
+                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
+                req.Headers.TryAddWithoutValidation("Referer", $"https://www.huya.com/{roomId}");
+                if (!string.IsNullOrEmpty(_cookies)) req.Headers.TryAddWithoutValidation("Cookie", _cookies);
                 
                 var res = await _httpClient.SendAsync(req);
                 var json = JsonNode.Parse(await res.Content.ReadAsStringAsync());
@@ -415,8 +430,8 @@ namespace HuyaStreamGetter
                 {
                     // LOL 分区优先走 PC 页面流解析
                     var pcReq = new HttpRequestMessage(HttpMethod.Get, $"https://www.huya.com/{roomId}");
-                    pcReq.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
-                    if (!string.IsNullOrEmpty(_cookies)) pcReq.Headers.Add("Cookie", _cookies);
+                    pcReq.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
+                    if (!string.IsNullOrEmpty(_cookies)) pcReq.Headers.TryAddWithoutValidation("Cookie", _cookies);
                     
                     var pcRes = await _httpClient.SendAsync(pcReq);
                     var pcHtml = await pcRes.Content.ReadAsStringAsync();
@@ -466,6 +481,250 @@ namespace HuyaStreamGetter
                 if (ex.Message.Contains("Not Live") || ex.Message.Contains("Cookie Invalid")) throw;
                 throw new Exception($"Huya Error: {ex.Message}");
             }
+        }
+    }
+
+    public class PlatformCookieStatus
+    {
+        public string Platform { get; set; } = "";
+        public bool Configured { get; set; }
+        public bool IsValid { get; set; }
+        public string Username { get; set; } = "";
+        public string Message { get; set; } = "";
+        public DateTime? LastChecked { get; set; }
+    }
+
+    public static class CookieVerifier
+    {
+        public static async Task<PlatformCookieStatus> VerifyAsync(string platform, string? cookies)
+        {
+            return (platform?.ToLower() ?? "") switch
+            {
+                "huya" => await VerifyHuyaAsync(cookies),
+                "douyu" => await VerifyDouyuAsync(cookies),
+                "bilibili" => await VerifyBilibiliAsync(cookies),
+                _ => new PlatformCookieStatus { Platform = platform ?? "", Configured = false, IsValid = false, Message = "未知平台" }
+            };
+        }
+
+        public static async Task<PlatformCookieStatus> VerifyBilibiliAsync(string? cookies)
+        {
+            string clean = BaseExtractor.SanitizeAsciiHeader(cookies);
+            var status = new PlatformCookieStatus
+            {
+                Platform = "bilibili",
+                Configured = !string.IsNullOrWhiteSpace(clean),
+                LastChecked = DateTime.Now
+            };
+
+            if (!status.Configured)
+            {
+                status.IsValid = false;
+                status.Message = "未配置";
+                return status;
+            }
+
+            try
+            {
+                using var handler = new HttpClientHandler 
+                { 
+                    UseCookies = false,
+                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                };
+                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+                var req = new HttpRequestMessage(HttpMethod.Get, "https://api.bilibili.com/x/web-interface/nav");
+                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                req.Headers.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
+                req.Headers.TryAddWithoutValidation("Cookie", clean);
+
+                var res = await client.SendAsync(req);
+                if (!res.IsSuccessStatusCode)
+                {
+                    status.IsValid = false;
+                    status.Message = $"HTTP 错误 ({(int)res.StatusCode})";
+                    return status;
+                }
+
+                var json = JsonNode.Parse(await res.Content.ReadAsStringAsync());
+                int code = json?["code"]?.GetValue<int>() ?? -1;
+                bool isLogin = json?["data"]?["isLogin"]?.GetValue<bool>() ?? false;
+
+                if (code == 0 && isLogin)
+                {
+                    status.IsValid = true;
+                    status.Username = json?["data"]?["uname"]?.GetValue<string>() ?? "";
+                    int vipStatus = json?["data"]?["vipStatus"]?.GetValue<int>() ?? 0;
+                    status.Message = vipStatus == 1 ? "大会员已授权" : "已授权有效";
+                }
+                else
+                {
+                    status.IsValid = false;
+                    status.Message = "Cookie已失效或未登录";
+                }
+            }
+            catch (Exception ex)
+            {
+                status.IsValid = false;
+                status.Message = $"检测异常: {ex.Message}";
+            }
+
+            return status;
+        }
+
+        public static async Task<PlatformCookieStatus> VerifyDouyuAsync(string? cookies)
+        {
+            string clean = BaseExtractor.SanitizeAsciiHeader(cookies);
+            var status = new PlatformCookieStatus
+            {
+                Platform = "douyu",
+                Configured = !string.IsNullOrWhiteSpace(clean),
+                LastChecked = DateTime.Now
+            };
+
+            if (!status.Configured)
+            {
+                status.IsValid = false;
+                status.Message = "未配置";
+                return status;
+            }
+
+            try
+            {
+                using var handler = new HttpClientHandler 
+                { 
+                    UseCookies = false,
+                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                };
+                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+                var req = new HttpRequestMessage(HttpMethod.Get, "https://www.douyu.com/wgapi/member/user/userInfo");
+                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                req.Headers.TryAddWithoutValidation("Referer", "https://www.douyu.com/");
+                req.Headers.TryAddWithoutValidation("Cookie", clean);
+
+                var res = await client.SendAsync(req);
+                if (!res.IsSuccessStatusCode)
+                {
+                    status.IsValid = false;
+                    status.Message = $"HTTP 错误 ({(int)res.StatusCode})";
+                    return status;
+                }
+
+                var json = JsonNode.Parse(await res.Content.ReadAsStringAsync());
+                int error = json?["error"]?.GetValue<int>() ?? -1;
+                if (error == 0 && json?["data"] != null)
+                {
+                    status.IsValid = true;
+                    status.Username = json["data"]?["nickname"]?.GetValue<string>() ?? json["data"]?["username"]?.GetValue<string>() ?? "";
+                    status.Message = "已授权有效";
+                }
+                else
+                {
+                    status.IsValid = false;
+                    status.Message = "Cookie已失效或未登录";
+                }
+            }
+            catch (Exception ex)
+            {
+                status.IsValid = false;
+                status.Message = $"检测异常: {ex.Message}";
+            }
+
+            return status;
+        }
+
+        public static async Task<PlatformCookieStatus> VerifyHuyaAsync(string? cookies)
+        {
+            string clean = BaseExtractor.SanitizeAsciiHeader(cookies);
+            var status = new PlatformCookieStatus
+            {
+                Platform = "huya",
+                Configured = !string.IsNullOrWhiteSpace(clean),
+                LastChecked = DateTime.Now
+            };
+
+            if (!status.Configured)
+            {
+                status.IsValid = false;
+                status.Message = "未配置";
+                return status;
+            }
+
+            try
+            {
+                using var handler = new HttpClientHandler 
+                { 
+                    UseCookies = false,
+                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                };
+                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+
+                // 优先检测 mp.huya.com 接口
+                try
+                {
+                    var req1 = new HttpRequestMessage(HttpMethod.Get, "https://mp.huya.com/cache.php?m=My");
+                    req1.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
+                    req1.Headers.TryAddWithoutValidation("Cookie", clean);
+                    var res1 = await client.SendAsync(req1);
+                    if (res1.IsSuccessStatusCode)
+                    {
+                        var json1 = JsonNode.Parse(await res1.Content.ReadAsStringAsync());
+                        int status1 = json1?["status"]?.GetValue<int>() ?? 0;
+                        if (status1 == 200 && json1?["data"]?["yyid"] != null)
+                        {
+                            status.IsValid = true;
+                            status.Username = json1["data"]?["nick"]?.GetValue<string>() ?? json1["data"]?["yyid"]?.ToString() ?? "";
+                            status.Message = "已授权有效";
+                            return status;
+                        }
+                    }
+                }
+                catch { }
+
+                // 备用检测 udb.huya.com 接口
+                try
+                {
+                    var req2 = new HttpRequestMessage(HttpMethod.Get, "https://udb.huya.com/udbserver/udb/getuserinfo.php");
+                    req2.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                    req2.Headers.TryAddWithoutValidation("Referer", "https://www.huya.com/");
+                    req2.Headers.TryAddWithoutValidation("Cookie", clean);
+
+                    var res2 = await client.SendAsync(req2);
+                    if (res2.IsSuccessStatusCode)
+                    {
+                        var content = await res2.Content.ReadAsStringAsync();
+                        var json = JsonNode.Parse(content);
+                        int code = json?["returncode"]?.GetValue<int>() ?? -1;
+                        if (code == 0)
+                        {
+                            status.IsValid = true;
+                            status.Username = json?["nick"]?.GetValue<string>() ?? json?["yyuid"]?.ToString() ?? "";
+                            status.Message = "已授权有效";
+                            return status;
+                        }
+                    }
+                }
+                catch { }
+
+                // 备用检测：提取 Cookie 中携带的 yyuid
+                var matchUid = Regex.Match(clean, @"(?:yyuid|udb_uid)=(\d+)");
+                if (matchUid.Success)
+                {
+                    status.IsValid = true;
+                    status.Username = $"UID: {matchUid.Groups[1].Value}";
+                    status.Message = "已授权有效 (凭据包含有效UID)";
+                    return status;
+                }
+
+                status.IsValid = false;
+                status.Message = "Cookie已失效或未登录";
+            }
+            catch (Exception ex)
+            {
+                status.IsValid = false;
+                status.Message = $"检测异常: {ex.Message}";
+            }
+
+            return status;
         }
     }
 }

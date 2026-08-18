@@ -278,6 +278,9 @@ app.MapGet("/api/status", () =>
             bool isStreaming = File.Exists(m3u8Path) && channel.Enable && 
                 (DateTime.Now - File.GetLastWriteTime(m3u8Path)).TotalSeconds <= 90;
 
+            string platformKey = (channel.Platform ?? "").ToLower();
+            Globals.PlatformCookieStatuses.TryGetValue(platformKey, out var cookieStatus);
+
             channelStatusList.Add(new
             {
                 id = channel.Id,
@@ -291,6 +294,10 @@ app.MapGet("/api/status", () =>
                 color = status?.Color.ToString() ?? "Gray",
                 retryCount = status?.RetryCount ?? 0,
                 isLive = isStreaming,
+                isCookieConfigured = cookieStatus?.Configured ?? (!string.IsNullOrWhiteSpace(channel.Cookies)),
+                isCookieValid = cookieStatus?.IsValid ?? false,
+                cookieUsername = cookieStatus?.Username ?? "",
+                cookieStatusMessage = cookieStatus?.Message ?? "",
                 hlsUrl = $"/live/{channel.Id}/stream.m3u8",
                 fullHlsUrl = $"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/live/{channel.Id}/stream.m3u8"
             });
@@ -309,16 +316,22 @@ app.MapGet("/api/status", () =>
         uptimeText = $"{(int)uptime.TotalHours}小时 {uptime.Minutes}分 {uptime.Seconds}秒",
         activeStreams = activeCount,
         totalChannels = Globals.Config.Channels.Count,
-        channels = channelStatusList
+        channels = channelStatusList,
+        cookieStatuses = Globals.PlatformCookieStatuses
     });
 });
 
-// 2. 获取配置 (Channels + CookieProfiles)
+// 2. 获取配置 (Channels + CookieProfiles + CookieStatuses)
 app.MapGet("/api/config", () =>
 {
     lock (Globals.ConfigLock)
     {
-        return Results.Json(Globals.Config);
+        return Results.Json(new
+        {
+            channels = Globals.Config.Channels,
+            cookieProfiles = Globals.Config.CookieProfiles,
+            cookieStatuses = Globals.PlatformCookieStatuses
+        });
     }
 });
 
@@ -474,7 +487,7 @@ app.MapPost("/api/channels/{id}/restart", (string id) =>
     return Results.Ok(new { success = true, message = $"已触发频道 {channel.Name} 重启" });
 });
 
-// 7. 保存指定平台 Cookie (huya, douyu, bilibili)
+// 7. 保存指定平台 Cookie (huya, douyu, bilibili) 并自动检测有效性
 app.MapPost("/api/cookies", async (CookieProfileRequest req) =>
 {
     if (string.IsNullOrWhiteSpace(req.Key))
@@ -495,7 +508,10 @@ app.MapPost("/api/cookies", async (CookieProfileRequest req) =>
     await SaveConfigAsync();
     Globals.StreamManager?.NotifyConfigChanged();
 
-    return Results.Ok(new { success = true, key, cookie = req.Cookie ?? "" });
+    // 自动发起一次有效性检测
+    var status = await Globals.CheckPlatformCookieAsync(key);
+
+    return Results.Ok(new { success = true, key, cookie = req.Cookie ?? "", status, statuses = Globals.PlatformCookieStatuses });
 });
 
 // 8. 清空指定平台 Cookie
@@ -511,9 +527,40 @@ app.MapDelete("/api/cookies/{key}", async (string key) =>
         }
     }
 
+    Globals.PlatformCookieStatuses[k] = new PlatformCookieStatus
+    {
+        Platform = k,
+        Configured = false,
+        IsValid = false,
+        Message = "未配置",
+        LastChecked = DateTime.Now
+    };
+
     await SaveConfigAsync();
     Globals.StreamManager?.NotifyConfigChanged();
-    return Results.Ok(new { success = true, message = $"已清空平台 '{k}' 的 Cookie" });
+    return Results.Ok(new { success = true, message = $"已清空平台 '{k}' 的 Cookie", statuses = Globals.PlatformCookieStatuses });
+});
+
+// 9. 手动检测平台 Cookie 有效性
+app.MapPost("/api/cookies/verify", async (HttpRequest request) =>
+{
+    string? platform = request.Query["platform"].ToString()?.Trim()?.ToLower();
+    if (string.IsNullOrWhiteSpace(platform) || platform == "all")
+    {
+        await Globals.CheckAllPlatformCookiesAsync();
+        return Results.Ok(new { success = true, statuses = Globals.PlatformCookieStatuses });
+    }
+    else
+    {
+        var status = await Globals.CheckPlatformCookieAsync(platform);
+        return Results.Ok(new { success = true, status, statuses = Globals.PlatformCookieStatuses });
+    }
+});
+
+// 10. 获取各平台 Cookie 实时健康状态
+app.MapGet("/api/cookies/status", () =>
+{
+    return Results.Ok(Globals.PlatformCookieStatuses);
 });
 
 // Master Playlist Endpoint - 指向动态代理而非静态文件
@@ -822,13 +869,29 @@ static void RefreshChannelCookies()
     if (!Globals.Config.CookieProfiles.ContainsKey("douyu")) Globals.Config.CookieProfiles["douyu"] = "";
     if (!Globals.Config.CookieProfiles.ContainsKey("bilibili")) Globals.Config.CookieProfiles["bilibili"] = "";
 
-    // 自动数据迁移
-    if (Globals.Config.CookieProfiles.TryGetValue("huya_main", out var oldHuya) && !string.IsNullOrEmpty(oldHuya) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["huya"]))
-        Globals.Config.CookieProfiles["huya"] = oldHuya;
-    if (Globals.Config.CookieProfiles.TryGetValue("bilibili_main", out var oldBili) && !string.IsNullOrEmpty(oldBili) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["bilibili"]))
-        Globals.Config.CookieProfiles["bilibili"] = oldBili;
-    if (Globals.Config.CookieProfiles.TryGetValue("douyu_main", out var oldDouyu) && !string.IsNullOrEmpty(oldDouyu) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["douyu"]))
-        Globals.Config.CookieProfiles["douyu"] = oldDouyu;
+    // 过滤掉默认模板残留的占位提示文字
+    Func<string?, string> cleanCookieStr = (str) =>
+    {
+        if (string.IsNullOrWhiteSpace(str)) return "";
+        if (str.Contains("这里粘贴") || str.Contains("示例") || str.Trim().Length < 5) return "";
+        return str.Trim();
+    };
+
+    if (Globals.Config.CookieProfiles.TryGetValue("huya_main", out var oldHuya) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["huya"]))
+        Globals.Config.CookieProfiles["huya"] = cleanCookieStr(oldHuya);
+    if (Globals.Config.CookieProfiles.TryGetValue("bilibili_main", out var oldBili) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["bilibili"]))
+        Globals.Config.CookieProfiles["bilibili"] = cleanCookieStr(oldBili);
+    if (Globals.Config.CookieProfiles.TryGetValue("douyu_main", out var oldDouyu) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["douyu"]))
+        Globals.Config.CookieProfiles["douyu"] = cleanCookieStr(oldDouyu);
+
+    Globals.Config.CookieProfiles["huya"] = cleanCookieStr(Globals.Config.CookieProfiles["huya"]);
+    Globals.Config.CookieProfiles["douyu"] = cleanCookieStr(Globals.Config.CookieProfiles["douyu"]);
+    Globals.Config.CookieProfiles["bilibili"] = cleanCookieStr(Globals.Config.CookieProfiles["bilibili"]);
+
+    // 移除旧格式 key 避免冗余
+    Globals.Config.CookieProfiles.Remove("huya_main");
+    Globals.Config.CookieProfiles.Remove("douyu_main");
+    Globals.Config.CookieProfiles.Remove("bilibili_main");
 
     foreach (var channel in Globals.Config.Channels)
     {
@@ -945,6 +1008,7 @@ public static class Globals
     public static readonly ConcurrentDictionary<string, BaseExtractor> Extractors = new();
     public static readonly HttpClient HttpClient = new();
     public static readonly ConcurrentDictionary<string, M3u8CacheEntry> M3u8Cache = new();
+    public static readonly ConcurrentDictionary<string, PlatformCookieStatus> PlatformCookieStatuses = new(StringComparer.OrdinalIgnoreCase);
     public static StreamManagerService? StreamManager;
     
     public static void UpdateStatus(string channelId, string message, ConsoleColor color, bool incrementRetry = false)
@@ -959,6 +1023,27 @@ public static class Globals
                 if (incrementRetry) status.RetryCount++;
             }
         }
+    }
+
+    public static async Task<PlatformCookieStatus> CheckPlatformCookieAsync(string platform)
+    {
+        string p = (platform ?? "").Trim().ToLower();
+        string cookie = "";
+        lock (ConfigLock)
+        {
+            if (Config.CookieProfiles.TryGetValue(p, out var c))
+                cookie = c;
+        }
+        var status = await CookieVerifier.VerifyAsync(p, cookie);
+        PlatformCookieStatuses[p] = status;
+        return status;
+    }
+
+    public static async Task CheckAllPlatformCookiesAsync()
+    {
+        await CheckPlatformCookieAsync("huya");
+        await CheckPlatformCookieAsync("douyu");
+        await CheckPlatformCookieAsync("bilibili");
     }
 }
 
@@ -1044,6 +1129,7 @@ public class StreamManagerService : BackgroundService
     
     private readonly ConcurrentDictionary<string, Process> _ffmpegProcesses = new();
     private readonly AutoResetEvent _triggerEvent = new(false);
+    private DateTime _lastCookieCheckTime = DateTime.MinValue;
 
     public StreamManagerService()
     {
@@ -1109,6 +1195,13 @@ public class StreamManagerService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            // 定期后台巡检已配置的 Cookie (每 30 分钟一次，启动时立即触发)
+            if ((DateTime.UtcNow - _lastCookieCheckTime).TotalMinutes >= 30)
+            {
+                _lastCookieCheckTime = DateTime.UtcNow;
+                _ = Task.Run(Globals.CheckAllPlatformCookiesAsync, stoppingToken);
+            }
+
             List<ChannelConfig> currentChannels;
             lock (Globals.ConfigLock)
             {

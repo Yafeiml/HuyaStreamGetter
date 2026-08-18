@@ -5,6 +5,8 @@
 let appState = {
     status: null,
     config: null,
+    cookieStatuses: {},
+    cookieEditors: { huya: false, douyu: false, bilibili: false },
     editingChannelId: null,
     hlsPlayer: null,
     pollTimer: null,
@@ -67,7 +69,11 @@ async function loadConfig() {
     try {
         const res = await fetch('/api/config');
         if (res.ok) {
-            appState.config = await res.json();
+            const data = await res.json();
+            appState.config = data;
+            if (data.cookieStatuses) {
+                appState.cookieStatuses = data.cookieStatuses;
+            }
             updateCookieStatusSummary();
         }
     } catch (err) {
@@ -79,8 +85,13 @@ async function loadStatus(showToastOnSuccess = false) {
     try {
         const res = await fetch('/api/status');
         if (res.ok) {
-            appState.status = await res.json();
+            const data = await res.json();
+            appState.status = data;
+            if (data.cookieStatuses) {
+                appState.cookieStatuses = data.cookieStatuses;
+            }
             renderDashboard();
+            updateCookieStatusSummary();
             if (showToastOnSuccess) {
                 showToast('状态已刷新', 'success');
             }
@@ -92,17 +103,30 @@ async function loadStatus(showToastOnSuccess = false) {
 
 function updateCookieStatusSummary() {
     const profiles = appState.config?.cookieProfiles || {};
-    const configuredList = [];
-    if (profiles.huya && profiles.huya.trim().length > 0) configuredList.push('虎牙');
-    if (profiles.douyu && profiles.douyu.trim().length > 0) configuredList.push('斗鱼');
-    if (profiles.bilibili && profiles.bilibili.trim().length > 0) configuredList.push('B站');
+    const statuses = appState.cookieStatuses || {};
+    const platforms = ['huya', 'douyu', 'bilibili'];
+
+    let hasExpired = false;
+    let configuredCount = 0;
+
+    platforms.forEach(p => {
+        const hasVal = profiles[p] && profiles[p].trim().length > 0;
+        if (hasVal) {
+            configuredCount++;
+            if (statuses[p] && statuses[p].isValid === false) {
+                hasExpired = true;
+            }
+        }
+    });
 
     const summaryEl = document.getElementById('stat-cookie-count');
     if (summaryEl) {
-        if (configuredList.length === 3) {
-            summaryEl.innerHTML = '<span style="color: var(--success);">全部已配置</span>';
-        } else if (configuredList.length > 0) {
-            summaryEl.innerText = `${configuredList.join(' · ')} 已配置`;
+        if (hasExpired) {
+            summaryEl.innerHTML = '<span style="color: var(--danger); font-weight: 600;">⚠️ 存在失效 Cookie</span>';
+        } else if (configuredCount === 3) {
+            summaryEl.innerHTML = '<span style="color: var(--success);">全部已授权 (有效)</span>';
+        } else if (configuredCount > 0) {
+            summaryEl.innerHTML = `<span style="color: var(--success);">${configuredCount} 个平台已授权</span>`;
         } else {
             summaryEl.innerHTML = '<span style="color: var(--text-muted);">全平台免登录</span>';
         }
@@ -199,12 +223,26 @@ function createChannelCardHtml(ch) {
         `;
     }
 
-    // 平台 Cookie 状态展示
+    // 平台 Cookie 状态与真伪检测状态展示
     const platformKey = (ch.platform || 'huya').toLowerCase();
-    const hasPlatformCookie = appState.config?.cookieProfiles?.[platformKey]?.trim()?.length > 0;
-    const cookieDisplayText = hasPlatformCookie 
-        ? `<span class="cookie-tag-inline active">🔑 ${platformName} Cookie (已授权)</span>`
-        : `<span class="cookie-tag-inline muted">免登录模式</span>`;
+    const cookieVal = appState.config?.cookieProfiles?.[platformKey] || ch.cookies || '';
+    const hasPlatformCookie = cookieVal.trim().length > 0;
+    const cookieStatus = appState.cookieStatuses?.[platformKey] || {
+        configured: ch.isCookieConfigured ?? hasPlatformCookie,
+        isValid: ch.isCookieValid ?? true,
+        username: ch.cookieUsername ?? '',
+        message: ch.cookieStatusMessage ?? ''
+    };
+
+    let cookieDisplayText = `<span class="cookie-tag-inline muted">⚪ 免登录</span>`;
+    if (hasPlatformCookie) {
+        if (cookieStatus.isValid === false) {
+            // 过期高亮红字
+            cookieDisplayText = `<span class="cookie-tag-inline expired" title="${escapeHtml(cookieStatus.message || 'Cookie已失效')}">🔴 已过期</span>`;
+        } else {
+            cookieDisplayText = `<span class="cookie-tag-inline active" title="Cookie有效并已授权">🟢 已授权</span>`;
+        }
+    }
 
     // 试播按钮可用状态 (只有推流中才能试播)
     const canPreview = ch.isLive;
@@ -335,11 +373,23 @@ function sanitizeUrl(rawUrl, platform) {
     return str.split('?')[0];
 }
 
-function updatePlatformUi(platform) {
-    document.getElementById('channel-platform').value = platform;
+function updatePlatformUi(platform, isUserUrlPresent = false) {
+    if (platform) {
+        document.getElementById('channel-platform').value = platform;
+    }
     const badge = document.getElementById('detected-platform-badge');
     const cookieText = document.getElementById('channel-cookie-status-text');
     const cookieBox = document.getElementById('channel-cookie-status-display');
+
+    if (!isUserUrlPresent || !platform) {
+        // 未填入链接时的初始空状态
+        if (badge) badge.style.display = 'none';
+        if (cookieText && cookieBox) {
+            cookieBox.className = 'static-field-display';
+            cookieText.innerHTML = '等待输入链接...';
+        }
+        return;
+    }
 
     const hasCookie = appState.config?.cookieProfiles?.[platform]?.trim()?.length > 0;
     const pName = getPlatformDisplayName(platform);
@@ -353,10 +403,10 @@ function updatePlatformUi(platform) {
     if (cookieText && cookieBox) {
         if (hasCookie) {
             cookieBox.className = 'static-field-display active';
-            cookieText.innerHTML = `🟢 自动匹配<strong>【${pName}】Cookie (已配置)</strong>`;
+            cookieText.innerHTML = `<strong>已授权</strong> (已自动绑定)`;
         } else {
             cookieBox.className = 'static-field-display';
-            cookieText.innerHTML = `⚪ 免登录模式 (可在平台 Cookie 中配置)`;
+            cookieText.innerHTML = `免登录模式 (可在平台Cookie中配置)`;
         }
     }
 }
@@ -367,12 +417,12 @@ function onUrlInput() {
     const rawVal = urlInput?.value?.trim() || '';
 
     if (!rawVal) {
-        document.getElementById('detected-platform-badge').style.display = 'none';
+        updatePlatformUi(null, false);
         return;
     }
 
     const platform = detectPlatformFromUrl(rawVal);
-    updatePlatformUi(platform);
+    updatePlatformUi(platform, true);
 
     // 400ms 防抖自动清理 URL 并自动识别名称
     appState.urlDebounceTimer = setTimeout(() => {
@@ -387,14 +437,17 @@ function onUrlInput() {
 function onUrlBlur() {
     const urlInput = document.getElementById('channel-url');
     const rawVal = urlInput?.value?.trim() || '';
-    if (!rawVal) return;
+    if (!rawVal) {
+        updatePlatformUi(null, false);
+        return;
+    }
 
     const platform = detectPlatformFromUrl(rawVal);
     const clean = sanitizeUrl(rawVal, platform);
     if (clean && clean !== rawVal) {
         urlInput.value = clean;
     }
-    updatePlatformUi(platform);
+    updatePlatformUi(platform, true);
 
     const nameInput = document.getElementById('channel-name');
     if (nameInput && !nameInput.value.trim()) {
@@ -411,11 +464,12 @@ async function autoFetchChannelInfo(silent = false) {
 
     if (!rawUrl) {
         if (!silent) showToast('请先输入直播间链接或房间号', 'error');
+        updatePlatformUi(null, false);
         return;
     }
 
     const platform = detectPlatformFromUrl(rawUrl);
-    updatePlatformUi(platform);
+    updatePlatformUi(platform, true);
 
     if (btn) {
         btn.innerText = '⏳ 识别中...';
@@ -430,7 +484,7 @@ async function autoFetchChannelInfo(silent = false) {
                 urlInput.value = data.cleanUrl;
             }
             if (data.platform) {
-                updatePlatformUi(data.platform);
+                updatePlatformUi(data.platform, true);
             }
             if (data.name && nameInput) {
                 nameInput.value = data.name;
@@ -469,9 +523,9 @@ function openAddChannelModal() {
     document.getElementById('channel-url').value = '';
     document.getElementById('channel-quality').value = 'OD';
     document.getElementById('channel-enable').checked = true;
-    document.getElementById('detected-platform-badge').style.display = 'none';
 
-    updatePlatformUi('huya');
+    // 默认空状态，不显示任何平台识别或Cookie匹配标签
+    updatePlatformUi(null, false);
     openModal('modal-channel');
 }
 
@@ -490,7 +544,7 @@ function openEditChannelModal(id) {
     document.getElementById('channel-enable').checked = channel.enable !== false;
 
     const platform = channel.platform?.toLowerCase() || detectPlatformFromUrl(channel.url);
-    updatePlatformUi(platform);
+    updatePlatformUi(platform, true);
 
     openModal('modal-channel');
 }
@@ -599,8 +653,30 @@ function openCookieModal() {
     openModal('modal-cookies');
 }
 
+function togglePlatformCookieEdit(platform, forceState = null) {
+    const editor = document.getElementById(`editor-cookie-${platform}`);
+    const btnEdit = document.getElementById(`btn-edit-${platform}`);
+    if (!editor) return;
+
+    const isCurrentlyOpen = editor.style.display !== 'none';
+    const nextState = forceState !== null ? forceState : !isCurrentlyOpen;
+
+    editor.style.display = nextState ? 'flex' : 'none';
+    appState.cookieEditors[platform] = nextState;
+
+    if (btnEdit) {
+        btnEdit.innerText = nextState ? '🔼 收起' : '✏️ 编辑';
+    }
+
+    if (nextState) {
+        const textarea = document.getElementById(`cookie-${platform}`);
+        textarea?.focus();
+    }
+}
+
 function renderPlatformCookieCards() {
     const profiles = appState.config?.cookieProfiles || {};
+    const statuses = appState.cookieStatuses || {};
     const platforms = ['huya', 'douyu', 'bilibili'];
 
     platforms.forEach(p => {
@@ -608,21 +684,117 @@ function renderPlatformCookieCards() {
         const textarea = document.getElementById(`cookie-${p}`);
         const tag = document.getElementById(`${p}-cookie-tag`);
         const card = document.getElementById(`card-cookie-${p}`);
+        const btnClear = document.getElementById(`btn-clear-${p}`);
+        const btnVerify = document.getElementById(`btn-verify-${p}`);
+        const status = statuses[p];
 
-        if (textarea) textarea.value = val;
+        if (textarea && document.activeElement !== textarea) {
+            textarea.value = val;
+        }
+
+        const isConfigured = val && val.trim().length > 0;
+        if (card) {
+            if (isConfigured) card.classList.add('configured');
+            else card.classList.remove('configured');
+        }
+
+        if (btnClear) {
+            btnClear.style.display = isConfigured ? 'inline-block' : 'none';
+        }
+        if (btnVerify) {
+            btnVerify.style.display = isConfigured ? 'inline-block' : 'none';
+        }
 
         if (tag) {
-            if (val && val.trim().length > 0) {
-                tag.className = 'cookie-status-tag active';
-                tag.innerText = `已配置 (${val.trim().length} 字符)`;
-                card?.classList.add('configured');
+            if (!isConfigured) {
+                tag.className = 'cookie-badge-status';
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">未配置 (免登录模式)</span>`;
+            } else if (status && status.isValid === true) {
+                tag.className = 'cookie-badge-status valid';
+                const userText = status.username ? `已授权: ${status.username}` : (status.message || '已授权有效');
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">${escapeHtml(userText)} (${val.trim().length} 字符)</span>`;
+            } else if (status && status.isValid === false) {
+                tag.className = 'cookie-badge-status expired';
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已过期: ${escapeHtml(status.message || '账号未登录')} (${val.trim().length} 字符)</span>`;
             } else {
-                tag.className = 'cookie-status-tag';
-                tag.innerText = '未配置 (免登录)';
-                card?.classList.remove('configured');
+                tag.className = 'cookie-badge-status';
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已配置 (${val.trim().length} 字符)</span>`;
             }
         }
     });
+}
+
+async function verifyPlatformCookie(platform) {
+    const btn = document.getElementById(`btn-verify-${platform}`);
+    const tag = document.getElementById(`${platform}-cookie-tag`);
+    const pName = getPlatformDisplayName(platform);
+
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = '⏳ 检测中...';
+    }
+    if (tag) {
+        tag.className = 'cookie-badge-status checking';
+        tag.innerHTML = `<span class="status-dot"></span><span class="status-text">正在鉴权检测...</span>`;
+    }
+
+    try {
+        const res = await fetch(`/api/cookies/verify?platform=${encodeURIComponent(platform)}`, {
+            method: 'POST'
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            if (data.statuses) {
+                appState.cookieStatuses = data.statuses;
+            }
+            renderPlatformCookieCards();
+            renderDashboard();
+            updateCookieStatusSummary();
+
+            const st = data.status || appState.cookieStatuses[platform];
+            if (st?.isValid) {
+                showToast(`${pName} Cookie 检测通过 (${st.username ? '用户: ' + st.username : st.message})`, 'success');
+            } else {
+                showToast(`${pName} Cookie 检测失败: ${st?.message || '已失效'}`, 'error');
+            }
+        } else {
+            showToast(`${pName} 检测请求失败`, 'error');
+            renderPlatformCookieCards();
+        }
+    } catch (err) {
+        showToast('检测请求异常: ' + err.message, 'error');
+        renderPlatformCookieCards();
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = '🔍 检测';
+        }
+    }
+}
+
+async function verifyAllPlatformCookies() {
+    showToast('正在检测全部平台 Cookie 状态...', 'info');
+    try {
+        const res = await fetch('/api/cookies/verify?platform=all', {
+            method: 'POST'
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            if (data.statuses) {
+                appState.cookieStatuses = data.statuses;
+            }
+            renderPlatformCookieCards();
+            renderDashboard();
+            updateCookieStatusSummary();
+            showToast('已完成全部平台有效性检测', 'success');
+        } else {
+            showToast('检测失败', 'error');
+        }
+    } catch (err) {
+        showToast('检测请求失败: ' + err.message, 'error');
+    }
 }
 
 async function savePlatformCookie(platform) {
@@ -638,9 +810,23 @@ async function savePlatformCookie(platform) {
         });
 
         if (res.ok) {
-            showToast(`${pName} Cookie 已保存并生效`, 'success');
+            const data = await res.json();
+            if (data.statuses) {
+                appState.cookieStatuses = data.statuses;
+            }
+            togglePlatformCookieEdit(platform, false);
             await loadConfig();
+            await loadStatus();
             renderPlatformCookieCards();
+
+            const st = data.status || appState.cookieStatuses[platform];
+            if (st?.isValid) {
+                showToast(`${pName} Cookie 已保存并验证通过 (${st.username || st.message})`, 'success');
+            } else if (cookie.length > 0) {
+                showToast(`${pName} Cookie 已保存，但检测提示: ${st?.message || '可能已失效'}`, 'warning');
+            } else {
+                showToast(`${pName} Cookie 已清空 (免登录)`, 'success');
+            }
         } else {
             showToast('保存 Cookie 失败', 'error');
         }
@@ -659,8 +845,14 @@ async function clearPlatformCookie(platform) {
         });
 
         if (res.ok) {
+            const data = await res.json();
+            if (data.statuses) {
+                appState.cookieStatuses = data.statuses;
+            }
+            togglePlatformCookieEdit(platform, false);
             showToast(`已清空 ${pName} Cookie`, 'success');
             await loadConfig();
+            await loadStatus();
             renderPlatformCookieCards();
         } else {
             showToast('清空失败', 'error');

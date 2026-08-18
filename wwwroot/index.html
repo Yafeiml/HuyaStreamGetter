@@ -225,63 +225,91 @@
                 <button class="modal-close" onclick="closeModal('modal-cookies')">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="section-desc">系统固定支持虎牙、斗鱼、B站三大平台。配置对应平台的 Cookie 即可自动解锁 2K/4K/原画最高码率流；留空则以免登录模式运行。</p>
+                <p class="section-desc">系统固定支持虎牙、斗鱼、B站三大平台。后台每 30 分钟会自动检测一次有效性；配置对应平台的 Cookie 即可自动解锁 2K/4K/原画最高码率流。</p>
                 
                 <div class="platform-cookie-grid">
                     <!-- 1. 虎牙直播 -->
                     <div class="platform-cookie-card" id="card-cookie-huya">
-                        <div class="cookie-card-header">
+                        <div class="cookie-card-summary">
                             <div class="platform-brand">
                                 <span class="platform-badge-tag huya">🐯 虎牙直播</span>
-                                <span class="cookie-status-tag" id="huya-cookie-tag">未配置 (免登录)</span>
+                                <div class="cookie-badge-status" id="huya-cookie-tag">
+                                    <span class="status-dot"></span>
+                                    <span class="status-text">未配置 (免登录模式)</span>
+                                </div>
                             </div>
-                            <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('huya')">清空</button>
+                            <div class="cookie-actions-group">
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="verifyPlatformCookie('huya')" id="btn-verify-huya" title="立即检测 Cookie 有效性">🔍 检测</button>
+                                <button type="button" class="btn btn-xs btn-primary" onclick="togglePlatformCookieEdit('huya')" id="btn-edit-huya">✏️ 编辑</button>
+                                <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('huya')" id="btn-clear-huya">清空</button>
+                            </div>
                         </div>
-                        <div class="cookie-card-body">
-                            <textarea id="cookie-huya" rows="3" placeholder="在此粘贴虎牙 Cookie（如 guid, u, ud_guid 等）..."></textarea>
-                        </div>
-                        <div class="cookie-card-footer">
-                            <button type="button" class="btn btn-sm btn-primary" onclick="savePlatformCookie('huya')">保存虎牙 Cookie</button>
+                        <div class="cookie-card-editor" id="editor-cookie-huya" style="display: none;">
+                            <label class="editor-label">虎牙 Cookie 凭据内容：</label>
+                            <textarea id="cookie-huya" rows="4" placeholder="在此粘贴虎牙 Cookie（包含 guid, udb_guiddata, udb_passdata 等）..."></textarea>
+                            <div class="editor-actions">
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="togglePlatformCookieEdit('huya', false)">取消</button>
+                                <button type="button" class="btn btn-xs btn-primary" onclick="savePlatformCookie('huya')">💾 保存并检测</button>
+                            </div>
                         </div>
                     </div>
 
                     <!-- 2. 斗鱼直播 -->
                     <div class="platform-cookie-card" id="card-cookie-douyu">
-                        <div class="cookie-card-header">
+                        <div class="cookie-card-summary">
                             <div class="platform-brand">
                                 <span class="platform-badge-tag douyu">🐬 斗鱼直播</span>
-                                <span class="cookie-status-tag" id="douyu-cookie-tag">未配置 (免登录)</span>
+                                <div class="cookie-badge-status" id="douyu-cookie-tag">
+                                    <span class="status-dot"></span>
+                                    <span class="status-text">未配置 (免登录模式)</span>
+                                </div>
                             </div>
-                            <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('douyu')">清空</button>
+                            <div class="cookie-actions-group">
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="verifyPlatformCookie('douyu')" id="btn-verify-douyu" title="立即检测 Cookie 有效性">🔍 检测</button>
+                                <button type="button" class="btn btn-xs btn-primary" onclick="togglePlatformCookieEdit('douyu')" id="btn-edit-douyu">✏️ 编辑</button>
+                                <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('douyu')" id="btn-clear-douyu">清空</button>
+                            </div>
                         </div>
-                        <div class="cookie-card-body">
-                            <textarea id="cookie-douyu" rows="3" placeholder="在此粘贴斗鱼 Cookie（如 dy_did, acf_auth 等）..."></textarea>
-                        </div>
-                        <div class="cookie-card-footer">
-                            <button type="button" class="btn btn-sm btn-primary" onclick="savePlatformCookie('douyu')">保存斗鱼 Cookie</button>
+                        <div class="cookie-card-editor" id="editor-cookie-douyu" style="display: none;">
+                            <label class="editor-label">斗鱼 Cookie 凭据内容：</label>
+                            <textarea id="cookie-douyu" rows="4" placeholder="在此粘贴斗鱼 Cookie（包含 dy_did, acf_auth, dy_auth 等）..."></textarea>
+                            <div class="editor-actions">
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="togglePlatformCookieEdit('douyu', false)">取消</button>
+                                <button type="button" class="btn btn-xs btn-primary" onclick="savePlatformCookie('douyu')">💾 保存并检测</button>
+                            </div>
                         </div>
                     </div>
 
                     <!-- 3. 哔哩哔哩 -->
                     <div class="platform-cookie-card" id="card-cookie-bilibili">
-                        <div class="cookie-card-header">
+                        <div class="cookie-card-summary">
                             <div class="platform-brand">
                                 <span class="platform-badge-tag bilibili">📺 哔哩哔哩</span>
-                                <span class="cookie-status-tag" id="bilibili-cookie-tag">未配置 (免登录)</span>
+                                <div class="cookie-badge-status" id="bilibili-cookie-tag">
+                                    <span class="status-dot"></span>
+                                    <span class="status-text">未配置 (免登录模式)</span>
+                                </div>
                             </div>
-                            <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('bilibili')">清空</button>
+                            <div class="cookie-actions-group">
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="verifyPlatformCookie('bilibili')" id="btn-verify-bilibili" title="立即检测 Cookie 有效性">🔍 检测</button>
+                                <button type="button" class="btn btn-xs btn-primary" onclick="togglePlatformCookieEdit('bilibili')" id="btn-edit-bilibili">✏️ 编辑</button>
+                                <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('bilibili')" id="btn-clear-bilibili">清空</button>
+                            </div>
                         </div>
-                        <div class="cookie-card-body">
-                            <textarea id="cookie-bilibili" rows="3" placeholder="在此粘贴 B站 Cookie（如 SESSDATA, bili_jct, DedeUserID 等）..."></textarea>
-                        </div>
-                        <div class="cookie-card-footer">
-                            <button type="button" class="btn btn-sm btn-primary" onclick="savePlatformCookie('bilibili')">保存 B站 Cookie</button>
+                        <div class="cookie-card-editor" id="editor-cookie-bilibili" style="display: none;">
+                            <label class="editor-label">B站 Cookie 凭据内容：</label>
+                            <textarea id="cookie-bilibili" rows="4" placeholder="在此粘贴 B站 Cookie（包含 SESSDATA, bili_jct, DedeUserID 等）..."></textarea>
+                            <div class="editor-actions">
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="togglePlatformCookieEdit('bilibili', false)">取消</button>
+                                <button type="button" class="btn btn-xs btn-primary" onclick="savePlatformCookie('bilibili')">💾 保存并检测</button>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cookies')">完成</button>
+            <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+                <button type="button" class="btn btn-secondary" onclick="verifyAllPlatformCookies()">🔍 检测全部平台有效性</button>
+                <button type="button" class="btn btn-primary" onclick="closeModal('modal-cookies')">完成</button>
             </div>
         </div>
     </div>

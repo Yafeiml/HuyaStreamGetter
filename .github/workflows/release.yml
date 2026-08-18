@@ -96,6 +96,7 @@ jobs:
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
           name: Release ${{ steps.get_version.outputs.VERSION }}
+          body_path: RELEASE_NOTES.md
           files: ./package/*
           draft: false
           prerelease: false

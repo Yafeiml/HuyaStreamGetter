@@ -808,24 +808,46 @@ textarea:focus {
     color: var(--bili-color);
 }
 
-/* Static Field Display for Cookie Mode */
+/* Static Field Display for Cookie Mode (单行对齐不折行) */
 .static-field-display {
     display: flex;
     align-items: center;
     gap: 8px;
     height: 40px;
+    line-height: 38px;
     padding: 0 12px;
     background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     font-size: 13px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+    box-sizing: border-box;
+    transition: all 0.2s ease;
 }
 
 .static-field-display.active {
-    border-color: rgba(16, 185, 129, 0.3);
-    background: rgba(16, 185, 129, 0.05);
-    color: var(--text-primary);
+    border-color: rgba(16, 185, 129, 0.35);
+    background: rgba(16, 185, 129, 0.08);
+    color: #34d399;
+    font-weight: 500;
+}
+
+.static-field-display .dot-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #64748b;
+    flex-shrink: 0;
+    transition: all 0.2s ease;
+}
+
+.static-field-display.active .dot-indicator {
+    background: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
 }
 
 /* Platform Cookie Cards in Modal (固定三大平台) */
@@ -839,18 +861,18 @@ textarea:focus {
 .platform-cookie-grid {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
 }
 
 .platform-cookie-card {
     background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-lg);
-    padding: 16px 18px;
+    padding: 14px 16px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    gap: 0;
+    transition: all 0.2s ease;
 }
 
 .platform-cookie-card.configured {
@@ -858,16 +880,19 @@ textarea:focus {
     background: rgba(19, 27, 44, 0.7);
 }
 
-.cookie-card-header {
+.cookie-card-summary {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
 }
 
 .platform-brand {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
+    flex-wrap: wrap;
 }
 
 .platform-badge-tag {
@@ -892,25 +917,93 @@ textarea:focus {
     color: var(--bili-color);
 }
 
-.cookie-status-tag {
+.cookie-badge-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-size: 12px;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(148, 163, 184, 0.1);
     color: var(--text-muted);
 }
 
-.cookie-status-tag.active {
-    color: var(--success);
+.cookie-badge-status .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #64748b;
+}
+
+.cookie-badge-status.valid {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+    font-weight: 500;
+}
+.cookie-badge-status.valid .status-dot {
+    background: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+
+.cookie-badge-status.expired {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    font-weight: 600;
+}
+.cookie-badge-status.expired .status-dot {
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+}
+
+.cookie-badge-status.checking {
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--primary);
+}
+.cookie-badge-status.checking .status-dot {
+    background: var(--primary);
+}
+
+.cookie-actions-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-xs {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: var(--radius-sm);
     font-weight: 500;
 }
 
-.cookie-card-body textarea {
+.cookie-card-editor {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    animation: fadeIn 0.2s ease-out;
+}
+
+.editor-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.cookie-card-editor textarea {
     font-family: monospace;
     font-size: 12px;
     resize: vertical;
+    width: 100%;
+    box-sizing: border-box;
 }
 
-.cookie-card-footer {
+.editor-actions {
     display: flex;
     justify-content: flex-end;
+    gap: 8px;
 }
 
 .btn-text-danger {
@@ -937,6 +1030,12 @@ textarea:focus {
 
 .cookie-tag-inline.active {
     color: #34d399;
+}
+
+.cookie-tag-inline.expired {
+    color: #ef4444 !important;
+    font-weight: 600;
+    animation: pulse 2s infinite;
 }
 
 .cookie-tag-inline.muted {
