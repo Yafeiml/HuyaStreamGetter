@@ -145,9 +145,12 @@ function renderDashboard() {
     document.getElementById('stat-active-streams').innerText = `${s.activeStreams} / ${s.totalChannels}`;
     document.getElementById('stat-uptime').innerText = s.uptimeText || '刚刚启动';
     
-    // 局域网中继端点：显示当前访问的主机与端口（例如 192.168.1.100:9898 或 localhost:9898），不再显示 Docker 内部 172.x 网段
-    const activeHost = window.location.host || s.displayHost || `${s.localIp}:${s.httpPort}`;
-    document.getElementById('stat-local-ip').innerText = activeHost;
+    // 局域网中继端点：优先显示配置的 customHost，其次显示后端识别的 displayHost，最后显示 window.location.host
+    let activeHost = appState.config?.customHost || s.displayHost || window.location.host;
+    if (activeHost && !activeHost.includes(':') && s.httpPort) {
+        activeHost = `${activeHost}:${s.httpPort}`;
+    }
+    document.getElementById('stat-local-ip').innerText = activeHost || `${s.localIp}:${s.httpPort}`;
     document.getElementById('badge-total-channels').innerText = `${s.totalChannels} 个频道`;
 
     // Render channels
@@ -993,8 +996,128 @@ async function copyTextToClipboard(text, label = '内容', buttonEl = null) {
     }
 }
 
-function copyM3uUrl() {
-    const url = `${window.location.origin}/jellyfin.m3u`;
+async function detectBrowserCandidateIps() {
+    return new Promise((resolve) => {
+        const ips = new Set();
+        try {
+            const RTCPeer = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+            if (!RTCPeer) return resolve([]);
+            const pc = new RTCPeer({ iceServers: [] });
+            pc.createDataChannel('');
+            pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(() => {});
+            pc.onicecandidate = (ice) => {
+                if (!ice || !ice.candidate || !ice.candidate.candidate) return;
+                const match = /([0-9]{1,3}(\.[0-9]{1,3}){3})/.exec(ice.candidate.candidate);
+                if (match && match[1]) {
+                    const ip = match[1];
+                    if (!ip.startsWith('127.') && !ip.startsWith('172.17.') && !ip.startsWith('172.18.') && !ip.startsWith('172.20.')) {
+                        ips.add(ip);
+                    }
+                }
+            };
+            setTimeout(() => {
+                try { pc.close(); } catch (_) {}
+                resolve(Array.from(ips));
+            }, 600);
+        } catch (_) {
+            resolve([]);
+        }
+    });
+}
+
+async function openHostModal(defaultFill = '') {
+    const input = document.getElementById('input-custom-host');
+    const hintBox = document.getElementById('host-candidate-box');
+    
+    if (input) {
+        input.value = appState.config?.customHost || defaultFill || '';
+    }
+
+    openModal('modal-host');
+
+    // 自动检测本机局域网候选 IP 并在下方显示一键填充标签
+    if (hintBox) {
+        hintBox.innerHTML = '<span>🔍 正在探测本机局域网 IP...</span>';
+        const detected = await detectBrowserCandidateIps();
+        if (detected.length > 0) {
+            hintBox.innerHTML = `
+                <div style="margin-top: 8px;">
+                    <span>💡 检测到本机可能 IP：</span>
+                    ${detected.map(ip => `
+                        <button type="button" class="btn btn-sm btn-secondary" style="padding: 2px 8px; font-size: 11px; margin: 2px 4px 2px 0;" onclick="selectCandidateHost('${ip}')">
+                            ${ip}
+                        </button>
+                    `).join('')}
+                </div>
+            `;
+            if (input && !input.value) {
+                input.value = detected[0];
+            }
+        } else {
+            hintBox.innerHTML = `<span>💡 提示：输入当前电脑/NAS的局域网 IP (如 192.168.10.2)，局域网其它设备即可直连。</span>`;
+        }
+    }
+}
+
+function selectCandidateHost(ip) {
+    const input = document.getElementById('input-custom-host');
+    if (input) {
+        input.value = ip;
+        input.focus();
+    }
+}
+
+async function saveCustomHost() {
+    const input = document.getElementById('input-custom-host');
+    const val = input ? input.value.trim() : '';
+    const btn = document.getElementById('btn-save-host');
+
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = '保存中...';
+    }
+
+    try {
+        const res = await fetch('/api/config/host', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ customHost: val })
+        });
+
+        if (res.ok) {
+            if (!appState.config) appState.config = {};
+            appState.config.customHost = val;
+            closeModal('modal-host');
+            await loadStatus(false);
+            showToast(val ? `已配置局域网主机: ${val}` : '已恢复自动识别主机', 'success');
+        } else {
+            showToast('保存失败，请稍后重试', 'error');
+        }
+    } catch (err) {
+        showToast('保存异常: ' + err.message, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = '保存生效';
+        }
+    }
+}
+
+async function copyM3uUrl() {
+    let url = appState.status?.m3uUrl || `${window.location.origin}/jellyfin.m3u`;
+    
+    // 如果当前通过 localhost / 127.0.0.1 访问，且配置中未设置 customHost，弹窗引导用户快速确认真实局域网 IP
+    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const hasCustomHost = appState.config?.customHost && appState.config.customHost.trim().length > 0;
+    
+    if (isLocalhost && !hasCustomHost && (url.includes('localhost') || url.includes('127.0.0.1'))) {
+        const detected = await detectBrowserCandidateIps();
+        const candidateIp = detected.length > 0 ? detected[0] : '';
+        openHostModal(candidateIp);
+        showToast('💡 请先确认/填写宿主机真实局域网 IP，以供其他设备访问', 'info');
+        return;
+    }
+
     const btn = document.getElementById('btn-copy-m3u');
     copyTextToClipboard(url, 'M3U 订阅源地址', btn);
 }

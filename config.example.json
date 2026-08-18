@@ -1,4 +1,5 @@
 {
+  "CustomHost": "（可选：指定局域网真实IP或域名，如 192.168.1.100，默认留空将自动根据访问客户端识别）",
   "CookieProfiles": {
     "huya_main": "（可选：在此粘贴虎牙网页版 Cookie，可直接获取最高原画/蓝光 4K 码率）",
     "douyu_main": "（可选：在此粘贴斗鱼网页版 Cookie）",

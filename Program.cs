@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -269,10 +270,20 @@ app.MapGet("/api/status", (HttpRequest request) =>
     var uptime = DateTime.UtcNow - Globals.StartTimeUtc;
     var channelStatusList = new List<object>();
 
-    string host = request.Host.HasValue ? request.Host.Value : $"{Globals.LocalIp}:{Globals.HTTP_PORT}";
-    string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
-    string baseUrl = $"{scheme}://{host}";
-    string clientHost = request.Host.Host;
+    string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
+    string displayHost = "";
+    string clientHost = "";
+    try
+    {
+        var uri = new Uri(effectiveBaseUrl);
+        displayHost = uri.Authority;
+        clientHost = uri.Host;
+    }
+    catch
+    {
+        displayHost = request.Host.HasValue ? request.Host.Value : $"{Globals.LocalIp}:{Globals.HTTP_PORT}";
+        clientHost = request.Host.Host;
+    }
 
     lock (Globals.StatusLock)
     {
@@ -305,7 +316,7 @@ app.MapGet("/api/status", (HttpRequest request) =>
                 cookieUsername = cookieStatus?.Username ?? "",
                 cookieStatusMessage = cookieStatus?.Message ?? "",
                 hlsUrl = $"/live/{channel.Id}/stream.m3u8",
-                fullHlsUrl = $"{baseUrl}/live/{channel.Id}/stream.m3u8"
+                fullHlsUrl = $"{effectiveBaseUrl}/live/{channel.Id}/stream.m3u8"
             });
         }
     }
@@ -317,8 +328,9 @@ app.MapGet("/api/status", (HttpRequest request) =>
         serverStatus = "运行中",
         localIp = clientHost,
         httpPort = request.Host.Port ?? Globals.HTTP_PORT,
-        displayHost = host,
-        m3uUrl = $"{baseUrl}/jellyfin.m3u",
+        displayHost = displayHost,
+        customHost = Globals.Config.CustomHost ?? "",
+        m3uUrl = $"{effectiveBaseUrl}/jellyfin.m3u",
         uptimeSeconds = (int)uptime.TotalSeconds,
         uptimeText = $"{(int)uptime.TotalHours}小时 {uptime.Minutes}分 {uptime.Seconds}秒",
         activeStreams = activeCount,
@@ -328,13 +340,14 @@ app.MapGet("/api/status", (HttpRequest request) =>
     });
 });
 
-// 2. 获取配置 (Channels + CookieProfiles + CookieStatuses)
+// 2. 获取配置 (Channels + CookieProfiles + CookieStatuses + CustomHost)
 app.MapGet("/api/config", () =>
 {
     lock (Globals.ConfigLock)
     {
         return Results.Json(new
         {
+            customHost = Globals.Config.CustomHost ?? "",
             channels = Globals.Config.Channels,
             cookieProfiles = Globals.Config.CookieProfiles,
             cookieStatuses = Globals.PlatformCookieStatuses
@@ -570,12 +583,22 @@ app.MapGet("/api/cookies/status", () =>
     return Results.Ok(Globals.PlatformCookieStatuses);
 });
 
+// 11. 设置/保存自定义局域网主机 IP 或域名
+app.MapPost("/api/config/host", async (JsonNode body) =>
+{
+    string host = body?["customHost"]?.GetValue<string>()?.Trim() ?? "";
+    lock (Globals.ConfigLock)
+    {
+        Globals.Config.CustomHost = host;
+    }
+    await SaveConfigAsync();
+    return Results.Ok(new { success = true, customHost = host });
+});
+
 // Master Playlist Endpoint - 指向动态代理而非静态文件
 app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
 {
-    string host = request.Host.HasValue ? request.Host.Value : $"{Globals.LocalIp}:{Globals.HTTP_PORT}";
-    string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
-    string baseUrl = $"{scheme}://{host}";
+    string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
 
     var m3uContent = new StringBuilder("#EXTM3U\n");
     lock (Globals.ConfigLock)
@@ -584,7 +607,7 @@ app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
         {
             if (!channel.Enable) continue;
             m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\" group-title=\"{channel.Platform}\",{channel.Name}");
-            m3uContent.AppendLine($"{baseUrl}/live/{channel.Id}/stream.m3u8");
+            m3uContent.AppendLine($"{effectiveBaseUrl}/live/{channel.Id}/stream.m3u8");
         }
     }
     
@@ -929,6 +952,63 @@ static void RefreshChannelCookies()
     }
 }
 
+static string ResolveEffectiveBaseUrl(HttpRequest request)
+{
+    // 1. 如果用户在配置中显式设置了 CustomHost (如 192.168.10.2 或 192.168.10.2:9898)
+    lock (Globals.ConfigLock)
+    {
+        if (!string.IsNullOrWhiteSpace(Globals.Config.CustomHost))
+        {
+            string custom = Globals.Config.CustomHost.Trim();
+            if (!custom.Contains(':'))
+            {
+                int port = request.Host.Port ?? Globals.HTTP_PORT;
+                custom = $"{custom}:{port}";
+            }
+            string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+            return $"{scheme}://{custom}";
+        }
+    }
+
+    // 2. 检查环境变量 HOST_IP / GATEWAY_HOST
+    string? envHost = Environment.GetEnvironmentVariable("HOST_IP") ?? Environment.GetEnvironmentVariable("GATEWAY_HOST");
+    if (!string.IsNullOrWhiteSpace(envHost))
+    {
+        string custom = envHost.Trim();
+        if (!custom.Contains(':'))
+        {
+            int port = request.Host.Port ?? Globals.HTTP_PORT;
+            custom = $"{custom}:{port}";
+        }
+        string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+        return $"{scheme}://{custom}";
+    }
+
+    // 3. 动态检测：如果请求来自于真实的局域网 IP / 域名 (非 localhost / 127.0.0.1 / 172.x)
+    string reqHost = request.Host.Host;
+    if (!string.IsNullOrEmpty(reqHost) &&
+        !reqHost.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
+        !reqHost.Equals("127.0.0.1") &&
+        !reqHost.Equals("::1") &&
+        !reqHost.StartsWith("172."))
+    {
+        string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+        return $"{scheme}://{request.Host.Value}";
+    }
+
+    // 4. 回退检查 LocalIp (如果非 127 / 172)
+    if (!string.IsNullOrEmpty(Globals.LocalIp) && !Globals.LocalIp.StartsWith("127.") && !Globals.LocalIp.StartsWith("172."))
+    {
+        string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+        return $"{scheme}://{Globals.LocalIp}:{Globals.HTTP_PORT}";
+    }
+
+    // 5. 默认返回请求自带 Host
+    string fallbackScheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+    string fallbackHost = request.Host.HasValue ? request.Host.Value : $"{Globals.LocalIp}:{Globals.HTTP_PORT}";
+    return $"{fallbackScheme}://{fallbackHost}";
+}
+
 static string GetLocalIPAddress()
 {
     string? envIp = Environment.GetEnvironmentVariable("HOST_IP") 
@@ -969,6 +1049,7 @@ static void ShowError(string message)
 // -------------------------------------------------------------
 public class AppConfig
 {
+    public string CustomHost { get; set; } = "";
     public List<ChannelConfig> Channels { get; set; } = [];
     public Dictionary<string, string> CookieProfiles { get; set; } = [];
 }
