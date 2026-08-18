@@ -227,7 +227,18 @@ namespace HuyaStreamGetter
                 var white = encJson["data"];
                 long ts = GetTimestampUnix();
                 string secret = white?["rand_str"]?.GetValue<string>() ?? "";
-                string salt = (white?["is_special"]?.GetValue<bool>() == false) ? $"{roomId}{ts}" : "";
+                
+                bool isSpecial = false;
+                var specialNode = white?["is_special"];
+                if (specialNode != null)
+                {
+                    if (specialNode.GetValueKind() == System.Text.Json.JsonValueKind.True) isSpecial = true;
+                    else if (specialNode.GetValueKind() == System.Text.Json.JsonValueKind.False) isSpecial = false;
+                    else if (specialNode.GetValueKind() == System.Text.Json.JsonValueKind.Number && specialNode.AsValue().TryGetValue<int>(out int numVal)) isSpecial = numVal != 0;
+                    else if (specialNode.ToString() == "1" || specialNode.ToString().Equals("true", StringComparison.OrdinalIgnoreCase)) isSpecial = true;
+                }
+                string salt = !isSpecial ? $"{roomId}{ts}" : "";
+
                 int encTime = white?["enc_time"]?.GetValue<int>() ?? 0;
                 string key = white?["key"]?.GetValue<string>() ?? "";
                 
