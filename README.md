@@ -135,8 +135,8 @@ services:
       # 持久化配置文件（请确保本地当前目录下有 config.json，可从 config.example.json 复制）
       - ./config.json:/app/config.json
     tmpfs:
-      # 【NAS 核心保护优化】将 HLS 切片缓存挂载到系统内存（128M 足够），避免 7x24 小时读写机械硬盘导致磨损
-      - /app/hls_stream:size=128M,mode=1777
+      # 【NAS 核心保护优化】将 HLS 切片缓存挂载到系统内存（512M 足以支撑多路 1080P60 / 4K / 原画直播流并发），避免 7x24 小时读写机械硬盘导致磨损
+      - /app/hls_stream:size=512M,mode=1777
     environment:
       - TZ=Asia/Shanghai
 ```
@@ -150,6 +150,13 @@ curl -sSL https://raw.githubusercontent.com/Yafeiml/LiveStreamGateway/main/confi
 docker compose up -d
 ```
 
+#### 🔄 Docker 一键升级
+- **Windows 用户**：直接双击仓库自带的 `upgrade.bat` 脚本即可全自动拉取最新镜像、平滑更新并清理旧镜像。
+- **Linux / NAS 用户**：在 `docker-compose.yml` 所在目录执行：
+  ```bash
+  docker compose pull && docker compose up -d --remove-orphans && docker image prune -f
+  ```
+
 ### 方式 2：Docker 命令行启动
 
 ```bash
@@ -158,7 +165,7 @@ docker run -d \
   --restart unless-stopped \
   -p 9898:9898 \
   -v $(pwd)/config.json:/app/config.json \
-  --tmpfs /app/hls_stream:size=128M \
+  --tmpfs /app/hls_stream:size=512M \
   -e TZ=Asia/Shanghai \
   ghcr.io/yafeiml/livestreamgateway:latest
 ```
