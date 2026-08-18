@@ -96,8 +96,8 @@
                     </svg>
                 </div>
                 <div class="stat-data">
-                    <div class="stat-value" id="stat-cookie-count">0 个配置</div>
-                    <div class="stat-label">已配置 Cookie 凭据池</div>
+                    <div class="stat-value" id="stat-cookie-count">虎牙 · 斗鱼 · B站</div>
+                    <div class="stat-label">平台 Cookie 配置状态</div>
                 </div>
             </div>
         </section>
@@ -119,7 +119,7 @@
                             <circle cx="10" cy="14" r="1" fill="currentColor"></circle>
                             <circle cx="15" cy="14" r="1.5" fill="currentColor"></circle>
                         </svg>
-                        <span>管理 Cookie 凭据池</span>
+                        <span>管理平台 Cookie</span>
                     </button>
                     <button class="btn btn-primary" id="btn-add-channel">
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
@@ -154,25 +154,21 @@
                 <button class="modal-close" onclick="closeModal('modal-channel')">&times;</button>
             </div>
             <form id="form-channel" onsubmit="saveChannel(event)">
-                <div class="form-group">
-                    <label for="channel-platform">直播平台 <span class="required">*</span></label>
-                    <select id="channel-platform" required onchange="onPlatformChange()">
-                        <option value="huya">虎牙直播 (Huya)</option>
-                        <option value="douyu">斗鱼直播 (Douyu)</option>
-                        <option value="bilibili">哔哩哔哩 (Bilibili)</option>
-                    </select>
-                </div>
-
+                <!-- 1. 直播间链接与自动识别 -->
                 <div class="form-group">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                         <label for="channel-url" style="margin-bottom: 0;">直播间链接 / 房间号 <span class="required">*</span></label>
                         <button type="button" class="btn-text-action" id="btn-auto-fetch" onclick="autoFetchChannelInfo()">
-                            ✨ 自动识别名称与ID
+                            ✨ 自动识别
                         </button>
                     </div>
-                    <input type="text" id="channel-url" placeholder="https://www.huya.com/eslcs 或房间号" required onblur="onUrlBlur()">
+                    <input type="text" id="channel-url" placeholder="粘贴虎牙、斗鱼或B站直播链接，自动识别并清理参数" required oninput="onUrlInput()" onblur="onUrlBlur()">
+                    <div id="detected-platform-badge" class="detected-platform-tag" style="display: none;"></div>
                 </div>
 
+                <input type="hidden" id="channel-platform" value="huya">
+
+                <!-- 2. 频道名称 & 频道唯一 ID -->
                 <div class="form-row">
                     <div class="form-group">
                         <label for="channel-name">频道名称 <span class="required">*</span></label>
@@ -184,6 +180,7 @@
                     </div>
                 </div>
 
+                <!-- 3. 画质等级 & 绑定 Cookie 状态 (自动匹配对应平台 Cookie) -->
                 <div class="form-row">
                     <div class="form-group">
                         <label for="channel-quality">画质等级</label>
@@ -195,14 +192,15 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label for="channel-cookie-key">绑定 Cookie 凭据</label>
-                        <select id="channel-cookie-key">
-                            <option value="">-- 免登录模式 --</option>
-                            <!-- Dynamically populated -->
-                        </select>
+                        <label>Cookie 授权状态</label>
+                        <div id="channel-cookie-status-display" class="static-field-display">
+                            <span class="dot-indicator"></span>
+                            <span id="channel-cookie-status-text">自动使用对应平台 Cookie</span>
+                        </div>
                     </div>
                 </div>
 
+                <!-- 4. 立即启用 -->
                 <div class="form-group checkbox-group">
                     <label class="switch-label">
                         <input type="checkbox" id="channel-enable" checked>
@@ -219,39 +217,71 @@
         </div>
     </div>
 
-    <!-- Modal: Cookie Profile Management -->
+    <!-- Modal: Platform Cookie Management (固定三大平台) -->
     <div class="modal-backdrop" id="modal-cookies">
         <div class="modal-card modal-large">
             <div class="modal-header">
-                <h3>Cookie 凭据池管理</h3>
+                <h3>平台 Cookie 管理</h3>
                 <button class="modal-close" onclick="closeModal('modal-cookies')">&times;</button>
             </div>
             <div class="modal-body">
-                <p class="section-desc">在此统一配置各平台的 Cookie 凭据。频道配置中绑定对应 Cookie 后，可直接解锁原画/蓝光 4K 等高码率直播流。</p>
+                <p class="section-desc">系统固定支持虎牙、斗鱼、B站三大平台。配置对应平台的 Cookie 即可自动解锁 2K/4K/原画最高码率流；留空则以免登录模式运行。</p>
                 
-                <div class="cookie-list" id="cookie-list-container">
-                    <!-- Cookie items rendered here -->
+                <div class="platform-cookie-grid">
+                    <!-- 1. 虎牙直播 -->
+                    <div class="platform-cookie-card" id="card-cookie-huya">
+                        <div class="cookie-card-header">
+                            <div class="platform-brand">
+                                <span class="platform-badge-tag huya">🐯 虎牙直播</span>
+                                <span class="cookie-status-tag" id="huya-cookie-tag">未配置 (免登录)</span>
+                            </div>
+                            <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('huya')">清空</button>
+                        </div>
+                        <div class="cookie-card-body">
+                            <textarea id="cookie-huya" rows="3" placeholder="在此粘贴虎牙 Cookie（如 guid, u, ud_guid 等）..."></textarea>
+                        </div>
+                        <div class="cookie-card-footer">
+                            <button type="button" class="btn btn-sm btn-primary" onclick="savePlatformCookie('huya')">保存虎牙 Cookie</button>
+                        </div>
+                    </div>
+
+                    <!-- 2. 斗鱼直播 -->
+                    <div class="platform-cookie-card" id="card-cookie-douyu">
+                        <div class="cookie-card-header">
+                            <div class="platform-brand">
+                                <span class="platform-badge-tag douyu">🐬 斗鱼直播</span>
+                                <span class="cookie-status-tag" id="douyu-cookie-tag">未配置 (免登录)</span>
+                            </div>
+                            <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('douyu')">清空</button>
+                        </div>
+                        <div class="cookie-card-body">
+                            <textarea id="cookie-douyu" rows="3" placeholder="在此粘贴斗鱼 Cookie（如 dy_did, acf_auth 等）..."></textarea>
+                        </div>
+                        <div class="cookie-card-footer">
+                            <button type="button" class="btn btn-sm btn-primary" onclick="savePlatformCookie('douyu')">保存斗鱼 Cookie</button>
+                        </div>
+                    </div>
+
+                    <!-- 3. 哔哩哔哩 -->
+                    <div class="platform-cookie-card" id="card-cookie-bilibili">
+                        <div class="cookie-card-header">
+                            <div class="platform-brand">
+                                <span class="platform-badge-tag bilibili">📺 哔哩哔哩</span>
+                                <span class="cookie-status-tag" id="bilibili-cookie-tag">未配置 (免登录)</span>
+                            </div>
+                            <button type="button" class="btn-text-danger" onclick="clearPlatformCookie('bilibili')">清空</button>
+                        </div>
+                        <div class="cookie-card-body">
+                            <textarea id="cookie-bilibili" rows="3" placeholder="在此粘贴 B站 Cookie（如 SESSDATA, bili_jct, DedeUserID 等）..."></textarea>
+                        </div>
+                        <div class="cookie-card-footer">
+                            <button type="button" class="btn btn-sm btn-primary" onclick="savePlatformCookie('bilibili')">保存 B站 Cookie</button>
+                        </div>
+                    </div>
                 </div>
-
-                <hr class="modal-divider">
-
-                <form id="form-cookie" onsubmit="saveCookie(event)" class="cookie-add-box">
-                    <h4>添加 / 编辑 Cookie 配置</h4>
-                    <div class="form-group">
-                        <label for="cookie-key">配置标识 Key <span class="required">*</span> <span class="tip">(如 huya_main, douyu_vip, bilibili_main)</span></label>
-                        <input type="text" id="cookie-key" placeholder="例如：huya_main" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="cookie-value">Cookie 完整内容</label>
-                        <textarea id="cookie-value" rows="3" placeholder="在此粘贴从浏览器 F12 复制的 Cookie 字符串..."></textarea>
-                    </div>
-                    <div class="cookie-form-actions">
-                        <button type="submit" class="btn btn-primary">保存 Cookie</button>
-                    </div>
-                </form>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cookies')">关闭</button>
+                <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cookies')">完成</button>
             </div>
         </div>
     </div>

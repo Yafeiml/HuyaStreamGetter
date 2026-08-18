@@ -775,64 +775,172 @@ textarea:focus {
     color: var(--text-primary);
 }
 
-/* Cookie Management Box */
-.section-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-bottom: 16px;
+/* Detected Platform Tag in Modal */
+.detected-platform-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    color: var(--primary);
+    animation: fadeIn 0.2s ease-out;
 }
 
-.cookie-list {
+.detected-platform-tag.tag-huya {
+    background: rgba(245, 158, 11, 0.1);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: var(--huya-color);
+}
+
+.detected-platform-tag.tag-douyu {
+    background: rgba(255, 107, 53, 0.1);
+    border-color: rgba(255, 107, 53, 0.3);
+    color: var(--douyu-color);
+}
+
+.detected-platform-tag.tag-bilibili {
+    background: rgba(0, 174, 236, 0.1);
+    border-color: rgba(0, 174, 236, 0.3);
+    color: var(--bili-color);
+}
+
+/* Static Field Display for Cookie Mode */
+.static-field-display {
     display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-bottom: 20px;
-}
-
-.cookie-item {
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 12px;
     background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
-    padding: 12px 14px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.static-field-display.active {
+    border-color: rgba(16, 185, 129, 0.3);
+    background: rgba(16, 185, 129, 0.05);
+    color: var(--text-primary);
+}
+
+/* Platform Cookie Cards in Modal (固定三大平台) */
+.section-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 18px;
+    line-height: 1.6;
+}
+
+.platform-cookie-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.platform-cookie-card {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.platform-cookie-card.configured {
+    border-color: rgba(59, 130, 246, 0.35);
+    background: rgba(19, 27, 44, 0.7);
+}
+
+.cookie-card-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
 }
 
-.cookie-item-key {
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 2px;
+.platform-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
-.cookie-item-len {
-    font-size: 11px;
+.platform-badge-tag {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+}
+
+.platform-badge-tag.huya {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--huya-color);
+}
+
+.platform-badge-tag.douyu {
+    background: rgba(255, 107, 53, 0.15);
+    color: var(--douyu-color);
+}
+
+.platform-badge-tag.bilibili {
+    background: rgba(0, 174, 236, 0.15);
+    color: var(--bili-color);
+}
+
+.cookie-status-tag {
+    font-size: 12px;
     color: var(--text-muted);
 }
 
-.cookie-item-actions {
-    display: flex;
-    gap: 6px;
+.cookie-status-tag.active {
+    color: var(--success);
+    font-weight: 500;
 }
 
-.modal-divider {
-    border: none;
-    border-top: 1px solid var(--border-color);
-    margin: 20px 0;
+.cookie-card-body textarea {
+    font-family: monospace;
+    font-size: 12px;
+    resize: vertical;
 }
 
-.cookie-add-box h4 {
-    font-size: 14px;
-    font-weight: 600;
-    margin-bottom: 12px;
-    color: var(--text-primary);
-    padding: 0 24px;
-}
-
-.cookie-form-actions {
+.cookie-card-footer {
     display: flex;
     justify-content: flex-end;
-    padding: 0 24px 10px;
+}
+
+.btn-text-danger {
+    background: none;
+    border: none;
+    color: var(--danger);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    transition: background-color 0.15s;
+}
+
+.btn-text-danger:hover {
+    background: rgba(239, 68, 68, 0.15);
+}
+
+.cookie-tag-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+}
+
+.cookie-tag-inline.active {
+    color: #34d399;
+}
+
+.cookie-tag-inline.muted {
+    color: var(--text-muted);
 }
 
 /* Video Player Modal */

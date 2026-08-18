@@ -7,7 +7,8 @@ let appState = {
     config: null,
     editingChannelId: null,
     hlsPlayer: null,
-    pollTimer: null
+    pollTimer: null,
+    urlDebounceTimer: null
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -27,7 +28,7 @@ function setupEventListeners() {
     // Copy M3U Button
     document.getElementById('btn-copy-m3u')?.addEventListener('click', copyM3uUrl);
     
-    // Manual Refresh Button with Click Spin Animation (图3)
+    // Manual Refresh Button with Click Spin Animation
     document.getElementById('btn-manual-refresh')?.addEventListener('click', async () => {
         const btn = document.getElementById('btn-manual-refresh');
         btn?.classList.add('spinning');
@@ -67,7 +68,7 @@ async function loadConfig() {
         const res = await fetch('/api/config');
         if (res.ok) {
             appState.config = await res.json();
-            updateCookieSelectOptions();
+            updateCookieStatusSummary();
         }
     } catch (err) {
         console.error('加载配置失败:', err);
@@ -89,6 +90,25 @@ async function loadStatus(showToastOnSuccess = false) {
     }
 }
 
+function updateCookieStatusSummary() {
+    const profiles = appState.config?.cookieProfiles || {};
+    const configuredList = [];
+    if (profiles.huya && profiles.huya.trim().length > 0) configuredList.push('虎牙');
+    if (profiles.douyu && profiles.douyu.trim().length > 0) configuredList.push('斗鱼');
+    if (profiles.bilibili && profiles.bilibili.trim().length > 0) configuredList.push('B站');
+
+    const summaryEl = document.getElementById('stat-cookie-count');
+    if (summaryEl) {
+        if (configuredList.length === 3) {
+            summaryEl.innerHTML = '<span style="color: var(--success);">全部已配置</span>';
+        } else if (configuredList.length > 0) {
+            summaryEl.innerText = `${configuredList.join(' · ')} 已配置`;
+        } else {
+            summaryEl.innerHTML = '<span style="color: var(--text-muted);">全平台免登录</span>';
+        }
+    }
+}
+
 // -------------------------------------------------------------
 // Dashboard Rendering
 // -------------------------------------------------------------
@@ -103,9 +123,6 @@ function renderDashboard() {
     document.getElementById('stat-uptime').innerText = s.uptimeText || '刚刚启动';
     document.getElementById('stat-local-ip').innerText = `${s.localIp}:${s.httpPort}`;
     document.getElementById('badge-total-channels').innerText = `${s.totalChannels} 个频道`;
-
-    const cookieCount = appState.config?.cookieProfiles ? Object.keys(appState.config.cookieProfiles).length : 0;
-    document.getElementById('stat-cookie-count').innerText = `${cookieCount} 个配置`;
 
     // Render channels
     const container = document.getElementById('channels-container');
@@ -130,7 +147,7 @@ function createChannelCardHtml(ch) {
     let statusText = ch.statusMessage || '准备中';
     let statusIconHtml = '';
 
-    // 状态分类判断与图标 (图1 & 图4)
+    // 状态分类判断与图标
     if (!ch.enable) {
         statusBadgeClass = 'disabled';
         statusText = '已禁用';
@@ -143,7 +160,7 @@ function createChannelCardHtml(ch) {
     } else if (ch.isLive) {
         statusBadgeClass = 'live';
         statusText = '推流中';
-        // 动态跳动绿色声波动画图标 (图4)
+        // 动态跳动绿色声波动画图标
         statusIconHtml = `
             <div class="live-wave-anim" title="正在实时推流">
                 <span class="bar"></span>
@@ -182,11 +199,14 @@ function createChannelCardHtml(ch) {
         `;
     }
 
-    const boundCookieText = ch.cookieProfileKey 
-        ? `<span title="${ch.cookieProfileKey}">${ch.cookieProfileKey}</span>` 
-        : '<span style="color: var(--text-muted);">免登录</span>';
+    // 平台 Cookie 状态展示
+    const platformKey = (ch.platform || 'huya').toLowerCase();
+    const hasPlatformCookie = appState.config?.cookieProfiles?.[platformKey]?.trim()?.length > 0;
+    const cookieDisplayText = hasPlatformCookie 
+        ? `<span class="cookie-tag-inline active">🔑 ${platformName} Cookie (已授权)</span>`
+        : `<span class="cookie-tag-inline muted">免登录模式</span>`;
 
-    // 试播按钮可用状态 (图1：只有推流中才能试播，未开播/失效则禁用)
+    // 试播按钮可用状态 (只有推流中才能试播)
     const canPreview = ch.isLive;
     const previewBtnHtml = canPreview
         ? `<button class="btn btn-sm btn-secondary" onclick="openPreviewModal('${ch.id}', '${escapeHtml(ch.name)}', '${ch.hlsUrl}')" title="在网页中实时试播">
@@ -223,8 +243,8 @@ function createChannelCardHtml(ch) {
                         <span class="info-value">${ch.quality || 'OD (原画)'}</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">绑定 Cookie:</span>
-                        <span class="info-value">${boundCookieText}</span>
+                        <span class="info-label">Cookie 授权:</span>
+                        <span class="info-value">${cookieDisplayText}</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">源链接:</span>
@@ -282,6 +302,161 @@ function getPlatformDisplayName(platform) {
 }
 
 // -------------------------------------------------------------
+// URL Parsing & Smart Platform Detection
+// -------------------------------------------------------------
+
+function detectPlatformFromUrl(rawUrl) {
+    if (!rawUrl) return 'huya';
+    const str = rawUrl.toLowerCase();
+    if (str.includes('bilibili.com') || str.includes('b23.tv')) return 'bilibili';
+    if (str.includes('douyu.com')) return 'douyu';
+    if (str.includes('huya.com')) return 'huya';
+    return 'huya';
+}
+
+function sanitizeUrl(rawUrl, platform) {
+    if (!rawUrl) return '';
+    let str = rawUrl.trim();
+
+    if (platform === 'bilibili' || str.includes('bilibili.com') || str.includes('b23.tv')) {
+        const m = str.match(/(?:live\.bilibili\.com\/|b23\.tv\/)(\d+)/i);
+        if (m) return `https://live.bilibili.com/${m[1]}`;
+    } else if (platform === 'douyu' || str.includes('douyu.com')) {
+        const mRid = str.match(/rid=(\d+)/i);
+        const mNum = str.match(/douyu\.com\/(\d+)/i);
+        if (mRid) return `https://www.douyu.com/${mRid[1]}`;
+        if (mNum) return `https://www.douyu.com/${mNum[1]}`;
+    } else if (platform === 'huya' || str.includes('huya.com')) {
+        const m = str.match(/huya\.com\/([a-zA-Z0-9_-]+)/i);
+        if (m) return `https://www.huya.com/${m[1]}`;
+    }
+
+    // 默认剥离 query 参数
+    return str.split('?')[0];
+}
+
+function updatePlatformUi(platform) {
+    document.getElementById('channel-platform').value = platform;
+    const badge = document.getElementById('detected-platform-badge');
+    const cookieText = document.getElementById('channel-cookie-status-text');
+    const cookieBox = document.getElementById('channel-cookie-status-display');
+
+    const hasCookie = appState.config?.cookieProfiles?.[platform]?.trim()?.length > 0;
+    const pName = getPlatformDisplayName(platform);
+
+    if (badge) {
+        badge.style.display = 'inline-flex';
+        badge.className = `detected-platform-tag tag-${platform}`;
+        badge.innerHTML = `🏷️ 已识别平台：<strong>${pName}直播</strong> (链接已自动规范化)`;
+    }
+
+    if (cookieText && cookieBox) {
+        if (hasCookie) {
+            cookieBox.className = 'static-field-display active';
+            cookieText.innerHTML = `🟢 自动匹配<strong>【${pName}】Cookie (已配置)</strong>`;
+        } else {
+            cookieBox.className = 'static-field-display';
+            cookieText.innerHTML = `⚪ 免登录模式 (可在平台 Cookie 中配置)`;
+        }
+    }
+}
+
+function onUrlInput() {
+    clearTimeout(appState.urlDebounceTimer);
+    const urlInput = document.getElementById('channel-url');
+    const rawVal = urlInput?.value?.trim() || '';
+
+    if (!rawVal) {
+        document.getElementById('detected-platform-badge').style.display = 'none';
+        return;
+    }
+
+    const platform = detectPlatformFromUrl(rawVal);
+    updatePlatformUi(platform);
+
+    // 400ms 防抖自动清理 URL 并自动识别名称
+    appState.urlDebounceTimer = setTimeout(() => {
+        const clean = sanitizeUrl(rawVal, platform);
+        if (clean && clean !== rawVal) {
+            urlInput.value = clean;
+        }
+        autoFetchChannelInfo(true);
+    }, 400);
+}
+
+function onUrlBlur() {
+    const urlInput = document.getElementById('channel-url');
+    const rawVal = urlInput?.value?.trim() || '';
+    if (!rawVal) return;
+
+    const platform = detectPlatformFromUrl(rawVal);
+    const clean = sanitizeUrl(rawVal, platform);
+    if (clean && clean !== rawVal) {
+        urlInput.value = clean;
+    }
+    updatePlatformUi(platform);
+
+    const nameInput = document.getElementById('channel-name');
+    if (nameInput && !nameInput.value.trim()) {
+        autoFetchChannelInfo(true);
+    }
+}
+
+async function autoFetchChannelInfo(silent = false) {
+    const urlInput = document.getElementById('channel-url');
+    const rawUrl = urlInput?.value?.trim();
+    const nameInput = document.getElementById('channel-name');
+    const idInput = document.getElementById('channel-id');
+    const btn = document.getElementById('btn-auto-fetch');
+
+    if (!rawUrl) {
+        if (!silent) showToast('请先输入直播间链接或房间号', 'error');
+        return;
+    }
+
+    const platform = detectPlatformFromUrl(rawUrl);
+    updatePlatformUi(platform);
+
+    if (btn) {
+        btn.innerText = '⏳ 识别中...';
+        btn.disabled = true;
+    }
+
+    try {
+        const res = await fetch(`/api/channels/fetch-info?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(rawUrl)}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (data.cleanUrl && urlInput) {
+                urlInput.value = data.cleanUrl;
+            }
+            if (data.platform) {
+                updatePlatformUi(data.platform);
+            }
+            if (data.name && nameInput) {
+                nameInput.value = data.name;
+                nameInput.classList.add('highlight-flash');
+                setTimeout(() => nameInput.classList.remove('highlight-flash'), 1000);
+            }
+            if (data.suggestedId && idInput && !idInput.disabled && (!idInput.value || !appState.editingChannelId)) {
+                idInput.value = data.suggestedId;
+                idInput.classList.add('highlight-flash');
+                setTimeout(() => idInput.classList.remove('highlight-flash'), 1000);
+            }
+            if (!silent && data.success) {
+                showToast(`已识别：${data.name}`, 'success');
+            }
+        }
+    } catch (err) {
+        if (!silent) showToast('识别失败: ' + err.message, 'error');
+    } finally {
+        if (btn) {
+            btn.innerText = '✨ 自动识别';
+            btn.disabled = false;
+        }
+    }
+}
+
+// -------------------------------------------------------------
 // Channel Add / Edit / Delete / Toggle
 // -------------------------------------------------------------
 
@@ -291,13 +466,12 @@ function openAddChannelModal() {
     document.getElementById('channel-id').value = '';
     document.getElementById('channel-id').disabled = false;
     document.getElementById('channel-name').value = '';
-    document.getElementById('channel-platform').value = 'huya';
     document.getElementById('channel-url').value = '';
     document.getElementById('channel-quality').value = 'OD';
-    document.getElementById('channel-cookie-key').value = '';
     document.getElementById('channel-enable').checked = true;
+    document.getElementById('detected-platform-badge').style.display = 'none';
 
-    updateCookieSelectOptions();
+    updatePlatformUi('huya');
     openModal('modal-channel');
 }
 
@@ -311,76 +485,14 @@ function openEditChannelModal(id) {
     document.getElementById('channel-id').value = channel.id;
     document.getElementById('channel-id').disabled = true; // ID 不可修改
     document.getElementById('channel-name').value = channel.name;
-    document.getElementById('channel-platform').value = channel.platform?.toLowerCase() || 'huya';
     document.getElementById('channel-url').value = channel.url;
     document.getElementById('channel-quality').value = channel.quality || 'OD';
     document.getElementById('channel-enable').checked = channel.enable !== false;
 
-    updateCookieSelectOptions(channel.cookieProfileKey);
+    const platform = channel.platform?.toLowerCase() || detectPlatformFromUrl(channel.url);
+    updatePlatformUi(platform);
+
     openModal('modal-channel');
-}
-
-function onPlatformChange() {
-    const platform = document.getElementById('channel-platform').value;
-    const urlInput = document.getElementById('channel-url');
-    if (platform === 'huya') urlInput.placeholder = 'https://www.huya.com/eslcs 或房间号';
-    else if (platform === 'douyu') urlInput.placeholder = 'https://www.douyu.com/9999 或房间号';
-    else if (platform === 'bilibili') urlInput.placeholder = 'https://live.bilibili.com/6 或房间号';
-}
-
-async function autoFetchChannelInfo(silent = false) {
-    const url = document.getElementById('channel-url')?.value.trim();
-    const platform = document.getElementById('channel-platform')?.value;
-    const nameInput = document.getElementById('channel-name');
-    const idInput = document.getElementById('channel-id');
-    const btn = document.getElementById('btn-auto-fetch');
-
-    if (!url) {
-        if (!silent) showToast('请先输入直播间链接或房间号', 'error');
-        return;
-    }
-
-    if (btn) {
-        btn.innerText = '⏳ 正在识别...';
-        btn.disabled = true;
-    }
-
-    try {
-        const res = await fetch(`/api/channels/fetch-info?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(url)}`);
-        if (res.ok) {
-            const data = await res.json();
-            if (data.success) {
-                if (nameInput) {
-                    nameInput.value = data.name;
-                    nameInput.classList.add('highlight-flash');
-                    setTimeout(() => nameInput.classList.remove('highlight-flash'), 1000);
-                }
-                if (idInput && !idInput.disabled && (!idInput.value || !appState.editingChannelId)) {
-                    idInput.value = data.suggestedId;
-                    idInput.classList.add('highlight-flash');
-                    setTimeout(() => idInput.classList.remove('highlight-flash'), 1000);
-                }
-                showToast(`已识别：${data.name}`, 'success');
-            } else if (!silent) {
-                showToast(data.message || '未获取到主播信息，可手动填写', 'error');
-            }
-        }
-    } catch (err) {
-        if (!silent) showToast('识别失败: ' + err.message, 'error');
-    } finally {
-        if (btn) {
-            btn.innerText = '✨ 自动识别名称与ID';
-            btn.disabled = false;
-        }
-    }
-}
-
-function onUrlBlur() {
-    const nameInput = document.getElementById('channel-name');
-    // 如果名称输入框为空，失焦时自动进行一次静默识别填充
-    if (nameInput && !nameInput.value.trim()) {
-        autoFetchChannelInfo(true);
-    }
 }
 
 async function saveChannel(event) {
@@ -388,11 +500,12 @@ async function saveChannel(event) {
 
     const id = document.getElementById('channel-id').value.trim();
     const name = document.getElementById('channel-name').value.trim();
-    const platform = document.getElementById('channel-platform').value;
-    const url = document.getElementById('channel-url').value.trim();
+    const platform = document.getElementById('channel-platform').value || 'huya';
+    let url = document.getElementById('channel-url').value.trim();
     const quality = document.getElementById('channel-quality').value;
-    const cookieProfileKey = document.getElementById('channel-cookie-key').value;
     const enable = document.getElementById('channel-enable').checked;
+
+    url = sanitizeUrl(url, platform);
 
     const payload = {
         id: appState.editingChannelId || id,
@@ -400,7 +513,7 @@ async function saveChannel(event) {
         platform,
         url,
         quality,
-        cookieProfileKey: cookieProfileKey || null,
+        cookieProfileKey: platform,
         enable
     };
 
@@ -478,74 +591,56 @@ async function restartChannel(id) {
 }
 
 // -------------------------------------------------------------
-// Cookie Profiles Management
+// Platform Cookie Management (固定三大平台)
 // -------------------------------------------------------------
 
 function openCookieModal() {
-    renderCookieList();
-    document.getElementById('cookie-key').value = '';
-    document.getElementById('cookie-value').value = '';
+    renderPlatformCookieCards();
     openModal('modal-cookies');
 }
 
-function renderCookieList() {
-    const listContainer = document.getElementById('cookie-list-container');
+function renderPlatformCookieCards() {
     const profiles = appState.config?.cookieProfiles || {};
-    const keys = Object.keys(profiles);
+    const platforms = ['huya', 'douyu', 'bilibili'];
 
-    if (keys.length === 0) {
-        listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 12px;">暂无配置 Cookie 凭据</div>';
-        return;
-    }
+    platforms.forEach(p => {
+        const val = profiles[p] || '';
+        const textarea = document.getElementById(`cookie-${p}`);
+        const tag = document.getElementById(`${p}-cookie-tag`);
+        const card = document.getElementById(`card-cookie-${p}`);
 
-    listContainer.innerHTML = keys.map(key => {
-        const val = profiles[key] || '';
-        const len = val.length;
-        return `
-            <div class="cookie-item">
-                <div>
-                    <div class="cookie-item-key">🔑 ${escapeHtml(key)}</div>
-                    <div class="cookie-item-len">长度: ${len} 字符 (${len > 20 ? '已配置' : '未填充'})</div>
-                </div>
-                <div class="cookie-item-actions">
-                    <button class="btn btn-sm btn-secondary" onclick="editCookie('${escapeHtml(key)}')">编辑</button>
-                    <button class="btn btn-sm btn-danger-outline" onclick="deleteCookie('${escapeHtml(key)}')">删除</button>
-                </div>
-            </div>
-        `;
-    }).join('');
+        if (textarea) textarea.value = val;
+
+        if (tag) {
+            if (val && val.trim().length > 0) {
+                tag.className = 'cookie-status-tag active';
+                tag.innerText = `已配置 (${val.trim().length} 字符)`;
+                card?.classList.add('configured');
+            } else {
+                tag.className = 'cookie-status-tag';
+                tag.innerText = '未配置 (免登录)';
+                card?.classList.remove('configured');
+            }
+        }
+    });
 }
 
-function editCookie(key) {
-    const val = appState.config?.cookieProfiles?.[key] || '';
-    document.getElementById('cookie-key').value = key;
-    document.getElementById('cookie-value').value = val;
-    document.getElementById('cookie-value').focus();
-}
-
-async function saveCookie(event) {
-    event.preventDefault();
-    const key = document.getElementById('cookie-key').value.trim();
-    const cookie = document.getElementById('cookie-value').value.trim();
-
-    if (!key) {
-        showToast('Cookie 标识 Key 不能为空', 'error');
-        return;
-    }
+async function savePlatformCookie(platform) {
+    const textarea = document.getElementById(`cookie-${platform}`);
+    const cookie = textarea?.value?.trim() || '';
+    const pName = getPlatformDisplayName(platform);
 
     try {
         const res = await fetch('/api/cookies', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key, cookie })
+            body: JSON.stringify({ key: platform, cookie })
         });
 
         if (res.ok) {
-            showToast(`Cookie Profile "${key}" 已保存`, 'success');
+            showToast(`${pName} Cookie 已保存并生效`, 'success');
             await loadConfig();
-            renderCookieList();
-            document.getElementById('cookie-key').value = '';
-            document.getElementById('cookie-value').value = '';
+            renderPlatformCookieCards();
         } else {
             showToast('保存 Cookie 失败', 'error');
         }
@@ -554,33 +649,25 @@ async function saveCookie(event) {
     }
 }
 
-async function deleteCookie(key) {
-    if (!confirm(`确定要删除 Cookie 配置 "${key}" 吗？关联此配置的频道将变为免登录模式。`)) return;
+async function clearPlatformCookie(platform) {
+    const pName = getPlatformDisplayName(platform);
+    if (!confirm(`确定要清空 ${pName} 的 Cookie 吗？关联此平台的频道将自动降级为免登录模式。`)) return;
 
     try {
-        const res = await fetch(`/api/cookies/${encodeURIComponent(key)}`, {
+        const res = await fetch(`/api/cookies/${encodeURIComponent(platform)}`, {
             method: 'DELETE'
         });
 
         if (res.ok) {
-            showToast(`Cookie Profile "${key}" 已删除`, 'success');
+            showToast(`已清空 ${pName} Cookie`, 'success');
             await loadConfig();
-            renderCookieList();
+            renderPlatformCookieCards();
+        } else {
+            showToast('清空失败', 'error');
         }
     } catch (err) {
-        showToast('删除失败: ' + err.message, 'error');
+        showToast('请求失败: ' + err.message, 'error');
     }
-}
-
-function updateCookieSelectOptions(selectedKey = null) {
-    const select = document.getElementById('channel-cookie-key');
-    if (!select) return;
-
-    const profiles = appState.config?.cookieProfiles || {};
-    const keys = Object.keys(profiles);
-
-    select.innerHTML = '<option value="">-- 免登录模式 --</option>' + 
-        keys.map(k => `<option value="${escapeHtml(k)}" ${k === selectedKey ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('');
 }
 
 // -------------------------------------------------------------

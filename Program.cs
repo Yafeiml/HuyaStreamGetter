@@ -84,14 +84,73 @@ app.UseStaticFiles(new StaticFileOptions
 // RESTful Management APIs
 // -------------------------------------------------------------
 
-// 0. 自动获取直播间主播名称与推荐 ID
-app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
+// 0. 自动获取直播间主播名称与推荐 ID (自动探测平台与清理 URL)
+app.MapGet("/api/channels/fetch-info", async (string? url, string? platform) =>
 {
     if (string.IsNullOrWhiteSpace(url))
         return Results.BadRequest(new { error = "请输入直播间链接或房间号" });
 
-    platform = (platform ?? "huya").ToLower();
-    string cleanUrl = url.Trim();
+    string input = url.Trim();
+    string detectedPlatform = (platform ?? "").ToLower();
+    string cleanUrl = input;
+    string roomId = "";
+
+    // 1. 智能探测平台 & 清理 URL 冗余跟踪参数
+    if (input.Contains("bilibili.com") || input.Contains("b23.tv"))
+    {
+        detectedPlatform = "bilibili";
+        var m = System.Text.RegularExpressions.Regex.Match(input, @"(?:live\.bilibili\.com/|b23\.tv/)(\d+)");
+        if (m.Success)
+        {
+            roomId = m.Groups[1].Value;
+            cleanUrl = $"https://live.bilibili.com/{roomId}";
+        }
+        else
+        {
+            roomId = input.Split('?')[0].TrimEnd('/').Split('/').Last();
+            cleanUrl = $"https://live.bilibili.com/{roomId}";
+        }
+    }
+    else if (input.Contains("huya.com"))
+    {
+        detectedPlatform = "huya";
+        var m = System.Text.RegularExpressions.Regex.Match(input, @"huya\.com/([a-zA-Z0-9_-]+)");
+        if (m.Success)
+        {
+            roomId = m.Groups[1].Value;
+            cleanUrl = $"https://www.huya.com/{roomId}";
+        }
+        else
+        {
+            roomId = input.Split('?')[0].TrimEnd('/').Split('/').Last();
+            cleanUrl = $"https://www.huya.com/{roomId}";
+        }
+    }
+    else if (input.Contains("douyu.com"))
+    {
+        detectedPlatform = "douyu";
+        var mRid = System.Text.RegularExpressions.Regex.Match(input, @"rid=(\d+)");
+        var mNum = System.Text.RegularExpressions.Regex.Match(input, @"douyu\.com/(\d+)");
+        if (mRid.Success) roomId = mRid.Groups[1].Value;
+        else if (mNum.Success) roomId = mNum.Groups[1].Value;
+        else
+        {
+            roomId = input.Split('?')[0].TrimEnd('/').Split('/').Last();
+        }
+        cleanUrl = $"https://www.douyu.com/{roomId}";
+    }
+    else
+    {
+        // 纯数字或房间号输入
+        if (string.IsNullOrEmpty(detectedPlatform))
+        {
+            detectedPlatform = "huya";
+        }
+        roomId = input.Split('?')[0].TrimEnd('/').Split('/').Last();
+        if (detectedPlatform == "huya") cleanUrl = $"https://www.huya.com/{roomId}";
+        else if (detectedPlatform == "douyu") cleanUrl = $"https://www.douyu.com/{roomId}";
+        else if (detectedPlatform == "bilibili") cleanUrl = $"https://live.bilibili.com/{roomId}";
+    }
 
     try
     {
@@ -99,9 +158,8 @@ app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
         string? suggestedId = null;
         string? title = null;
 
-        if (platform == "huya")
+        if (detectedPlatform == "huya")
         {
-            string roomId = cleanUrl.Split('?')[0].TrimEnd('/').Split('/').Last();
             suggestedId = $"huya_{roomId.ToLower()}";
 
             string pageUrl = cleanUrl.StartsWith("http") ? cleanUrl : $"https://www.huya.com/{roomId}";
@@ -128,12 +186,8 @@ app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
                 }
             }
         }
-        else if (platform == "douyu")
+        else if (detectedPlatform == "douyu")
         {
-            string roomId = cleanUrl.Split('?')[0].TrimEnd('/').Split('/').Last();
-            var match = System.Text.RegularExpressions.Regex.Match(cleanUrl, @"\d+");
-            if (match.Success) roomId = match.Value;
-
             suggestedId = $"douyu_{roomId}";
             string apiUrl = $"http://open.douyucdn.cn/api/RoomApi/room/{roomId}";
             using var req = new HttpRequestMessage(HttpMethod.Get, apiUrl);
@@ -150,9 +204,8 @@ app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
                 name = !string.IsNullOrEmpty(owner) ? $"斗鱼-{owner}" : $"斗鱼-{roomId}";
             }
         }
-        else if (platform == "bilibili")
+        else if (detectedPlatform == "bilibili")
         {
-            string roomId = cleanUrl.Split('?')[0].TrimEnd('/').Split('/').Last();
             suggestedId = $"bilibili_{roomId}";
 
             string userApi = $"https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid={roomId}";
@@ -183,12 +236,15 @@ app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
 
         if (string.IsNullOrEmpty(name))
         {
-            return Results.Ok(new { success = false, message = "未解析到主播名称，请手动输入" });
+            name = $"{detectedPlatform}_{roomId}";
         }
 
         return Results.Json(new
         {
             success = true,
+            platform = detectedPlatform,
+            cleanUrl,
+            roomId,
             name,
             suggestedId,
             title
@@ -196,7 +252,14 @@ app.MapGet("/api/channels/fetch-info", async (string? platform, string? url) =>
     }
     catch (Exception ex)
     {
-        return Results.Ok(new { success = false, message = $"自动获取失败: {ex.Message}" });
+        return Results.Ok(new { 
+            success = false, 
+            platform = detectedPlatform,
+            cleanUrl,
+            name = $"{detectedPlatform}_{roomId}",
+            suggestedId = $"{detectedPlatform}_{roomId}",
+            message = $"自动获取失败: {ex.Message}" 
+        });
     }
 });
 
@@ -262,23 +325,57 @@ app.MapGet("/api/config", () =>
 // 3. 添加或更新频道
 app.MapPost("/api/channels", async (ChannelConfig newChannel) =>
 {
-    if (string.IsNullOrWhiteSpace(newChannel.Name))
-        return Results.BadRequest(new { error = "频道名称不能为空" });
-
-    if (string.IsNullOrWhiteSpace(newChannel.Platform))
-        return Results.BadRequest(new { error = "所属平台不能为空" });
-
     if (string.IsNullOrWhiteSpace(newChannel.Url))
-        return Results.BadRequest(new { error = "直播间 URL 不能为空" });
+        return Results.BadRequest(new { error = "直播间链接不能为空" });
 
-    // 若 ID 为空，自动生成 ID
+    string url = newChannel.Url.Trim();
+    string platform = (newChannel.Platform ?? "").ToLower();
+
+    // 自动判定平台
+    if (string.IsNullOrEmpty(platform) || platform == "auto")
+    {
+        if (url.Contains("bilibili.com") || url.Contains("b23.tv")) platform = "bilibili";
+        else if (url.Contains("huya.com")) platform = "huya";
+        else if (url.Contains("douyu.com")) platform = "douyu";
+        else platform = "huya";
+    }
+
+    // 自动清洗 URL 冗余参数
+    if (platform == "bilibili")
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(url, @"(?:live\.bilibili\.com/|b23\.tv/)(\d+)");
+        if (m.Success) newChannel.Url = $"https://live.bilibili.com/{m.Groups[1].Value}";
+        else newChannel.Url = url.Split('?')[0];
+    }
+    else if (platform == "huya")
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(url, @"huya\.com/([a-zA-Z0-9_-]+)");
+        if (m.Success) newChannel.Url = $"https://www.huya.com/{m.Groups[1].Value}";
+        else newChannel.Url = url.Split('?')[0];
+    }
+    else if (platform == "douyu")
+    {
+        var mRid = System.Text.RegularExpressions.Regex.Match(url, @"rid=(\d+)");
+        var mNum = System.Text.RegularExpressions.Regex.Match(url, @"douyu\.com/(\d+)");
+        if (mRid.Success) newChannel.Url = $"https://www.douyu.com/{mRid.Groups[1].Value}";
+        else if (mNum.Success) newChannel.Url = $"https://www.douyu.com/{mNum.Groups[1].Value}";
+        else newChannel.Url = url.Split('?')[0];
+    }
+
+    newChannel.Platform = platform;
+    newChannel.CookieProfileKey = platform; // 固化绑定平台 Cookie
+
+    if (string.IsNullOrWhiteSpace(newChannel.Name))
+    {
+        newChannel.Name = $"{platform}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+    }
+
     if (string.IsNullOrWhiteSpace(newChannel.Id))
     {
-        newChannel.Id = $"{newChannel.Platform.ToLower()}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        newChannel.Id = $"{platform}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
     }
     else
     {
-        // 移除非法字符
         newChannel.Id = newChannel.Id.Trim().Replace(" ", "_");
     }
 
@@ -291,12 +388,13 @@ app.MapPost("/api/channels", async (ChannelConfig newChannel) =>
             existing.Platform = newChannel.Platform;
             existing.Url = newChannel.Url;
             existing.Quality = string.IsNullOrWhiteSpace(newChannel.Quality) ? "OD" : newChannel.Quality;
-            existing.CookieProfileKey = newChannel.CookieProfileKey;
+            existing.CookieProfileKey = platform;
             existing.Enable = newChannel.Enable;
         }
         else
         {
             newChannel.Quality = string.IsNullOrWhiteSpace(newChannel.Quality) ? "OD" : newChannel.Quality;
+            newChannel.CookieProfileKey = platform;
             Globals.Config.Channels.Add(newChannel);
         }
 
@@ -376,50 +474,46 @@ app.MapPost("/api/channels/{id}/restart", (string id) =>
     return Results.Ok(new { success = true, message = $"已触发频道 {channel.Name} 重启" });
 });
 
-// 7. 添加或更新 Cookie Profile
+// 7. 保存指定平台 Cookie (huya, douyu, bilibili)
 app.MapPost("/api/cookies", async (CookieProfileRequest req) =>
 {
     if (string.IsNullOrWhiteSpace(req.Key))
-        return Results.BadRequest(new { error = "Cookie 标识 (Key) 不能为空" });
+        return Results.BadRequest(new { error = "平台类型不能为空" });
+
+    string key = req.Key.Trim().ToLower();
+    if (key != "huya" && key != "douyu" && key != "bilibili")
+    {
+        return Results.BadRequest(new { error = "仅支持配置 huya (虎牙), douyu (斗鱼), bilibili (B站) 的 Cookie" });
+    }
 
     lock (Globals.ConfigLock)
     {
-        Globals.Config.CookieProfiles[req.Key.Trim()] = req.Cookie ?? "";
+        Globals.Config.CookieProfiles[key] = req.Cookie ?? "";
         RefreshChannelCookies();
     }
 
     await SaveConfigAsync();
     Globals.StreamManager?.NotifyConfigChanged();
 
-    return Results.Ok(new { success = true, key = req.Key });
+    return Results.Ok(new { success = true, key, cookie = req.Cookie ?? "" });
 });
 
-// 8. 删除 Cookie Profile
+// 8. 清空指定平台 Cookie
 app.MapDelete("/api/cookies/{key}", async (string key) =>
 {
-    bool removed = false;
+    string k = (key ?? "").Trim().ToLower();
     lock (Globals.ConfigLock)
     {
-        removed = Globals.Config.CookieProfiles.Remove(key);
-        if (removed)
+        if (Globals.Config.CookieProfiles.ContainsKey(k))
         {
-            // 清理对应频道的 CookieProfileKey 引用
-            foreach (var ch in Globals.Config.Channels.Where(c => c.CookieProfileKey == key))
-            {
-                ch.CookieProfileKey = null;
-                ch.Cookies = "";
-            }
+            Globals.Config.CookieProfiles[k] = "";
+            RefreshChannelCookies();
         }
     }
 
-    if (removed)
-    {
-        await SaveConfigAsync();
-        Globals.StreamManager?.NotifyConfigChanged();
-        return Results.Ok(new { success = true, message = $"Cookie Profile '{key}' 已删除" });
-    }
-
-    return Results.NotFound(new { error = "未找到指定的 Cookie Profile" });
+    await SaveConfigAsync();
+    Globals.StreamManager?.NotifyConfigChanged();
+    return Results.Ok(new { success = true, message = $"已清空平台 '{k}' 的 Cookie" });
 });
 
 // Master Playlist Endpoint - 指向动态代理而非静态文件
@@ -720,15 +814,43 @@ static async Task<bool> SaveConfigAsync()
 
 static void RefreshChannelCookies()
 {
-    if (Globals.Config.CookieProfiles == null) return;
+    if (Globals.Config.CookieProfiles == null)
+        Globals.Config.CookieProfiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    // 固化三家平台默认 key
+    if (!Globals.Config.CookieProfiles.ContainsKey("huya")) Globals.Config.CookieProfiles["huya"] = "";
+    if (!Globals.Config.CookieProfiles.ContainsKey("douyu")) Globals.Config.CookieProfiles["douyu"] = "";
+    if (!Globals.Config.CookieProfiles.ContainsKey("bilibili")) Globals.Config.CookieProfiles["bilibili"] = "";
+
+    // 自动数据迁移
+    if (Globals.Config.CookieProfiles.TryGetValue("huya_main", out var oldHuya) && !string.IsNullOrEmpty(oldHuya) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["huya"]))
+        Globals.Config.CookieProfiles["huya"] = oldHuya;
+    if (Globals.Config.CookieProfiles.TryGetValue("bilibili_main", out var oldBili) && !string.IsNullOrEmpty(oldBili) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["bilibili"]))
+        Globals.Config.CookieProfiles["bilibili"] = oldBili;
+    if (Globals.Config.CookieProfiles.TryGetValue("douyu_main", out var oldDouyu) && !string.IsNullOrEmpty(oldDouyu) && string.IsNullOrEmpty(Globals.Config.CookieProfiles["douyu"]))
+        Globals.Config.CookieProfiles["douyu"] = oldDouyu;
+
     foreach (var channel in Globals.Config.Channels)
     {
-        if (!string.IsNullOrEmpty(channel.CookieProfileKey))
+        string platformKey = (channel.Platform ?? "").Trim().ToLower();
+        if (string.IsNullOrEmpty(platformKey))
         {
-            if (Globals.Config.CookieProfiles.TryGetValue(channel.CookieProfileKey, out var cookieString))
-            {
-                channel.Cookies = cookieString;
-            }
+            if (channel.Url?.Contains("huya.com") == true) platformKey = "huya";
+            else if (channel.Url?.Contains("douyu.com") == true) platformKey = "douyu";
+            else if (channel.Url?.Contains("bilibili.com") == true || channel.Url?.Contains("b23.tv") == true) platformKey = "bilibili";
+            else platformKey = "huya";
+        }
+
+        channel.Platform = platformKey;
+        channel.CookieProfileKey = platformKey;
+
+        if (Globals.Config.CookieProfiles.TryGetValue(platformKey, out var cookieString) && !string.IsNullOrWhiteSpace(cookieString))
+        {
+            channel.Cookies = cookieString;
+        }
+        else
+        {
+            channel.Cookies = "";
         }
     }
 }
