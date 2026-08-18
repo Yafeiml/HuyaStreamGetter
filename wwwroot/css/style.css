@@ -299,6 +299,12 @@ body {
     animation: flashBorder 1s ease-out;
 }
 
+.btn-copied-success {
+    background: rgba(16, 185, 129, 0.15) !important;
+    border-color: #10b981 !important;
+    color: #10b981 !important;
+}
+
 @keyframes flashBorder {
     0% { border-color: var(--success); box-shadow: 0 0 8px rgba(16, 185, 129, 0.5); }
     100% { border-color: var(--border-color); box-shadow: none; }

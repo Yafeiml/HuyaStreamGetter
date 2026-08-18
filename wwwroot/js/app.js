@@ -53,10 +53,9 @@ function setupEventListeners() {
     // Copy stream url button inside preview modal
     document.getElementById('btn-copy-stream-url')?.addEventListener('click', () => {
         const url = document.getElementById('preview-hls-url')?.innerText;
+        const btn = document.getElementById('btn-copy-stream-url');
         if (url) {
-            navigator.clipboard.writeText(url).then(() => {
-                showToast('HLS 播放链接已复制到剪贴板', 'success');
-            });
+            copyTextToClipboard(url, 'HLS 播放链接', btn);
         }
     });
 }
@@ -145,7 +144,10 @@ function renderDashboard() {
     // Overview stats
     document.getElementById('stat-active-streams').innerText = `${s.activeStreams} / ${s.totalChannels}`;
     document.getElementById('stat-uptime').innerText = s.uptimeText || '刚刚启动';
-    document.getElementById('stat-local-ip').innerText = `${s.localIp}:${s.httpPort}`;
+    
+    // 局域网中继端点：显示当前访问的主机与端口（例如 192.168.1.100:9898 或 localhost:9898），不再显示 Docker 内部 172.x 网段
+    const activeHost = window.location.host || s.displayHost || `${s.localIp}:${s.httpPort}`;
+    document.getElementById('stat-local-ip').innerText = activeHost;
     document.getElementById('badge-total-channels').innerText = `${s.totalChannels} 个频道`;
 
     // Render channels
@@ -935,13 +937,66 @@ function closeModal(id) {
     document.getElementById(id)?.classList.remove('active');
 }
 
+async function copyTextToClipboard(text, label = '内容', buttonEl = null) {
+    if (!text) return;
+    let success = false;
+
+    // 1. 尝试现代 Clipboard API (HTTPS 或 localhost 环境)
+    if (navigator.clipboard && window.isSecureContext) {
+        try {
+            await navigator.clipboard.writeText(text);
+            success = true;
+        } catch (err) {
+            console.warn('navigator.clipboard.writeText 失败，尝试降级兼容方案:', err);
+        }
+    }
+
+    // 2. 兼容降级方案 (适用于纯 HTTP 局域网 IP 如 192.168.x.x 等环境)
+    if (!success) {
+        try {
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            textArea.style.position = 'fixed';
+            textArea.style.left = '-9999px';
+            textArea.style.top = '-9999px';
+            textArea.setAttribute('readonly', '');
+            document.body.appendChild(textArea);
+            textArea.select();
+            textArea.setSelectionRange(0, 99999);
+            success = document.execCommand('copy');
+            document.body.removeChild(textArea);
+        } catch (err) {
+            console.error('execCommand 复制失败:', err);
+        }
+    }
+
+    if (success) {
+        showToast(`${label}已复制到剪贴板！`, 'success');
+        if (buttonEl) {
+            const originalHtml = buttonEl.innerHTML;
+            const originalClass = buttonEl.className;
+            buttonEl.classList.add('btn-copied-success');
+            buttonEl.innerHTML = `
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                <span>已复制！</span>
+            `;
+            setTimeout(() => {
+                buttonEl.innerHTML = originalHtml;
+                buttonEl.className = originalClass;
+            }, 2000);
+        }
+    } else {
+        // 极端受限环境下的终极弹窗复制引导
+        prompt(`无法直接写入剪贴板，请按 Ctrl+C / Cmd+C 复制 ${label}：`, text);
+    }
+}
+
 function copyM3uUrl() {
-    const url = appState.status?.m3uUrl || `${window.location.origin}/jellyfin.m3u`;
-    navigator.clipboard.writeText(url).then(() => {
-        showToast('M3U 订阅源地址已复制到剪贴板！', 'success');
-    }).catch(() => {
-        showToast('复制失败，请手动复制: ' + url, 'error');
-    });
+    const url = `${window.location.origin}/jellyfin.m3u`;
+    const btn = document.getElementById('btn-copy-m3u');
+    copyTextToClipboard(url, 'M3U 订阅源地址', btn);
 }
 
 function showToast(message, type = 'info') {

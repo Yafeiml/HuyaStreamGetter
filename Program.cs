@@ -264,10 +264,15 @@ app.MapGet("/api/channels/fetch-info", async (string? url, string? platform) =>
 });
 
 // 1. 获取全局系统状态与频道状态大盘
-app.MapGet("/api/status", () =>
+app.MapGet("/api/status", (HttpRequest request) =>
 {
     var uptime = DateTime.UtcNow - Globals.StartTimeUtc;
     var channelStatusList = new List<object>();
+
+    string host = request.Host.HasValue ? request.Host.Value : $"{Globals.LocalIp}:{Globals.HTTP_PORT}";
+    string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+    string baseUrl = $"{scheme}://{host}";
+    string clientHost = request.Host.Host;
 
     lock (Globals.StatusLock)
     {
@@ -300,7 +305,7 @@ app.MapGet("/api/status", () =>
                 cookieUsername = cookieStatus?.Username ?? "",
                 cookieStatusMessage = cookieStatus?.Message ?? "",
                 hlsUrl = $"/live/{channel.Id}/stream.m3u8",
-                fullHlsUrl = $"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/live/{channel.Id}/stream.m3u8"
+                fullHlsUrl = $"{baseUrl}/live/{channel.Id}/stream.m3u8"
             });
         }
     }
@@ -310,9 +315,10 @@ app.MapGet("/api/status", () =>
     return Results.Json(new
     {
         serverStatus = "运行中",
-        localIp = Globals.LocalIp,
-        httpPort = Globals.HTTP_PORT,
-        m3uUrl = $"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/jellyfin.m3u",
+        localIp = clientHost,
+        httpPort = request.Host.Port ?? Globals.HTTP_PORT,
+        displayHost = host,
+        m3uUrl = $"{baseUrl}/jellyfin.m3u",
         uptimeSeconds = (int)uptime.TotalSeconds,
         uptimeText = $"{(int)uptime.TotalHours}小时 {uptime.Minutes}分 {uptime.Seconds}秒",
         activeStreams = activeCount,
@@ -565,8 +571,12 @@ app.MapGet("/api/cookies/status", () =>
 });
 
 // Master Playlist Endpoint - 指向动态代理而非静态文件
-app.MapGet("/jellyfin.m3u", () =>
+app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
 {
+    string host = request.Host.HasValue ? request.Host.Value : $"{Globals.LocalIp}:{Globals.HTTP_PORT}";
+    string scheme = string.IsNullOrEmpty(request.Scheme) ? "http" : request.Scheme;
+    string baseUrl = $"{scheme}://{host}";
+
     var m3uContent = new StringBuilder("#EXTM3U\n");
     lock (Globals.ConfigLock)
     {
@@ -574,7 +584,7 @@ app.MapGet("/jellyfin.m3u", () =>
         {
             if (!channel.Enable) continue;
             m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\" group-title=\"{channel.Platform}\",{channel.Name}");
-            m3uContent.AppendLine($"http://{Globals.LocalIp}:{Globals.HTTP_PORT}/live/{channel.Id}/stream.m3u8");
+            m3uContent.AppendLine($"{baseUrl}/live/{channel.Id}/stream.m3u8");
         }
     }
     
@@ -921,6 +931,14 @@ static void RefreshChannelCookies()
 
 static string GetLocalIPAddress()
 {
+    string? envIp = Environment.GetEnvironmentVariable("HOST_IP") 
+        ?? Environment.GetEnvironmentVariable("GATEWAY_HOST")
+        ?? Environment.GetEnvironmentVariable("SERVER_IP");
+    if (!string.IsNullOrWhiteSpace(envIp))
+    {
+        return envIp.Trim();
+    }
+
     try
     {
         using Socket socket = new(AddressFamily.InterNetwork, SocketType.Dgram, 0);
