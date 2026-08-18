@@ -296,6 +296,7 @@ app.MapGet("/api/status", () =>
                 isLive = isStreaming,
                 isCookieConfigured = cookieStatus?.Configured ?? (!string.IsNullOrWhiteSpace(channel.Cookies)),
                 isCookieValid = cookieStatus?.IsValid ?? false,
+                isCookieNetworkError = cookieStatus?.IsNetworkError ?? false,
                 cookieUsername = cookieStatus?.Username ?? "",
                 cookieStatusMessage = cookieStatus?.Message ?? "",
                 hlsUrl = $"/live/{channel.Id}/stream.m3u8",
@@ -1034,9 +1035,32 @@ public static class Globals
             if (Config.CookieProfiles.TryGetValue(p, out var c))
                 cookie = c;
         }
-        var status = await CookieVerifier.VerifyAsync(p, cookie);
-        PlatformCookieStatuses[p] = status;
-        return status;
+
+        var previousStatus = PlatformCookieStatuses.TryGetValue(p, out var oldSt) ? oldSt : null;
+        var newStatus = await CookieVerifier.VerifyAsync(p, cookie);
+
+        // 【关键防误判机制】：网络/SSL等非认证错误绝不能改变已授权凭据的有效状态
+        if (newStatus.Configured && newStatus.IsNetworkError)
+        {
+            if (previousStatus != null && previousStatus.Configured && previousStatus.IsValid)
+            {
+                // 维持上一次已授权有效状态与用户名
+                newStatus.IsValid = true;
+                newStatus.Username = previousStatus.Username;
+                newStatus.Message = string.IsNullOrWhiteSpace(previousStatus.Username)
+                    ? "已授权有效 (网络波动，保持状态)"
+                    : $"{previousStatus.Message} (网络检测波动)";
+            }
+            else
+            {
+                // 首次若遇网络异常，默认视作已配置有效状态，不误判为过期
+                newStatus.IsValid = true;
+                newStatus.Message = "已配置 (网络波动，待下次复判)";
+            }
+        }
+
+        PlatformCookieStatuses[p] = newStatus;
+        return newStatus;
     }
 
     public static async Task CheckAllPlatformCookiesAsync()

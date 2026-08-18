@@ -207,17 +207,21 @@ function createChannelCardHtml(ch) {
     const cookieStatus = appState.cookieStatuses?.[platformKey] || {
         configured: ch.isCookieConfigured ?? hasPlatformCookie,
         isValid: ch.isCookieValid ?? true,
+        isNetworkError: ch.isCookieNetworkError ?? false,
         username: ch.cookieUsername ?? '',
         message: ch.cookieStatusMessage ?? ''
     };
 
     let cookieDisplayText = `<span class="cookie-tag-inline muted">⚪ 免登录</span>`;
     if (hasPlatformCookie) {
-        if (cookieStatus.isValid === false) {
-            // 过期高亮红字
+        if (cookieStatus.isValid === false && !cookieStatus.isNetworkError) {
+            // 明确确认过期，高亮红字
             cookieDisplayText = `<span class="cookie-tag-inline expired" title="${escapeHtml(cookieStatus.message || 'Cookie已失效')}">🔴 已过期</span>`;
+        } else if (cookieStatus.isNetworkError) {
+            // 网络检测异常，保持有效授权状态
+            cookieDisplayText = `<span class="cookie-tag-inline active" title="${escapeHtml(cookieStatus.message || '网络检测波动，维持授权状态')}">🟢 已授权</span>`;
         } else {
-            cookieDisplayText = `<span class="cookie-tag-inline active" title="Cookie有效并已授权">🟢 已授权</span>`;
+            cookieDisplayText = `<span class="cookie-tag-inline active" title="${escapeHtml(cookieStatus.message || 'Cookie有效并已授权')}">🟢 已授权</span>`;
         }
     }
 
@@ -690,6 +694,9 @@ function renderPlatformCookieCards() {
                 tag.className = 'cookie-badge-status valid';
                 const userText = status.username ? `已授权: ${status.username}` : (status.message || '已授权有效');
                 tag.innerHTML = `<span class="status-dot"></span><span class="status-text">${escapeHtml(userText)} (${val.trim().length} 字符)</span>`;
+            } else if (status && status.isNetworkError) {
+                tag.className = 'cookie-badge-status valid';
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已配置 (网络波动，保持状态) (${val.trim().length} 字符)</span>`;
             } else if (status && status.isValid === false) {
                 tag.className = 'cookie-badge-status expired';
                 tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已过期: ${escapeHtml(status.message || '账号未登录')} (${val.trim().length} 字符)</span>`;
@@ -730,8 +737,10 @@ async function verifyPlatformCookie(platform) {
             updateCookieStatusSummary();
 
             const st = data.status || appState.cookieStatuses[platform];
-            if (st?.isValid) {
+            if (st?.isValid && !st?.isNetworkError) {
                 showToast(`${pName} Cookie 检测通过 (${st.username ? '用户: ' + st.username : st.message})`, 'success');
+            } else if (st?.isNetworkError) {
+                showToast(`${pName} Cookie 检测提示: ${st.message}，保持当前授权状态`, 'warning');
             } else {
                 showToast(`${pName} Cookie 检测失败: ${st?.message || '已失效'}`, 'error');
             }

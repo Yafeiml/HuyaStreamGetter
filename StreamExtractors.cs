@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
@@ -469,7 +470,7 @@ namespace LiveStreamGateway
                         _sHlsUrlSuffix = selectedItem["sHlsUrlSuffix"]?.GetValue<string>() ?? "m3u8";
                         _sHlsAntiCode = selectedItem["sHlsAntiCode"]?.GetValue<string>() ?? "";
                         string newAntiCode = GetAntiCode(_sHlsAntiCode, _sStreamName);
-                        string m3u8Url = $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio={_ratioParam}";
+                    string m3u8Url = $"{_sHlsUrl}/{_sStreamName}.{_sHlsUrlSuffix}?{newAntiCode}&ratio={_ratioParam}";
                         return m3u8Url;
                     }
                 }
@@ -489,6 +490,7 @@ namespace LiveStreamGateway
         public string Platform { get; set; } = "";
         public bool Configured { get; set; }
         public bool IsValid { get; set; }
+        public bool IsNetworkError { get; set; }
         public string Username { get; set; } = "";
         public string Message { get; set; } = "";
         public DateTime? LastChecked { get; set; }
@@ -496,18 +498,65 @@ namespace LiveStreamGateway
 
     public static class CookieVerifier
     {
+        private static HttpClient CreateHttpClient(int timeoutSeconds = 8)
+        {
+            var handler = new SocketsHttpHandler
+            {
+                UseCookies = false,
+                AllowAutoRedirect = true,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+                ConnectTimeout = TimeSpan.FromSeconds(5),
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = (sender, cert, chain, sslPolicyErrors) => true
+                }
+            };
+
+            var client = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(timeoutSeconds),
+                DefaultRequestVersion = HttpVersion.Version11,
+                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
+            };
+            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+            return client;
+        }
+
         public static async Task<PlatformCookieStatus> VerifyAsync(string platform, string? cookies)
         {
             return (platform?.ToLower() ?? "") switch
             {
-                "huya" => await VerifyHuyaAsync(cookies),
-                "douyu" => await VerifyDouyuAsync(cookies),
-                "bilibili" => await VerifyBilibiliAsync(cookies),
+                "huya" => await VerifyWithRetryAsync(() => VerifyHuyaOnceAsync(cookies)),
+                "douyu" => await VerifyWithRetryAsync(() => VerifyDouyuOnceAsync(cookies)),
+                "bilibili" => await VerifyWithRetryAsync(() => VerifyBilibiliOnceAsync(cookies)),
                 _ => new PlatformCookieStatus { Platform = platform ?? "", Configured = false, IsValid = false, Message = "未知平台" }
             };
         }
 
-        public static async Task<PlatformCookieStatus> VerifyBilibiliAsync(string? cookies)
+        private static async Task<PlatformCookieStatus> VerifyWithRetryAsync(Func<Task<PlatformCookieStatus>> verifyFunc, int maxRetries = 3)
+        {
+            PlatformCookieStatus lastStatus = new();
+            for (int i = 1; i <= maxRetries; i++)
+            {
+                lastStatus = await verifyFunc();
+
+                // 若未配置、验证成功、或明确检测到凭据失效（非网络通信错误），无需重试，直接返回
+                if (!lastStatus.Configured || lastStatus.IsValid || !lastStatus.IsNetworkError)
+                {
+                    return lastStatus;
+                }
+
+                // 若为网络波动错误，等待短暂间隔进行下一次复判
+                if (i < maxRetries)
+                {
+                    await Task.Delay(1000 * i);
+                }
+            }
+
+            return lastStatus;
+        }
+
+        public static async Task<PlatformCookieStatus> VerifyBilibiliOnceAsync(string? cookies)
         {
             string clean = BaseExtractor.SanitizeAsciiHeader(cookies);
             var status = new PlatformCookieStatus
@@ -526,22 +575,27 @@ namespace LiveStreamGateway
 
             try
             {
-                using var handler = new HttpClientHandler 
-                { 
-                    UseCookies = false,
-                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                using var client = CreateHttpClient(timeoutSeconds: 8);
+                var req = new HttpRequestMessage(HttpMethod.Get, "https://api.bilibili.com/x/web-interface/nav")
+                {
+                    Version = HttpVersion.Version11
                 };
-                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
-                var req = new HttpRequestMessage(HttpMethod.Get, "https://api.bilibili.com/x/web-interface/nav");
-                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
                 req.Headers.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
                 req.Headers.TryAddWithoutValidation("Cookie", clean);
 
                 var res = await client.SendAsync(req);
+                if ((int)res.StatusCode >= 500 || (int)res.StatusCode == 429)
+                {
+                    status.IsNetworkError = true;
+                    status.Message = $"服务端暂时不可达 (HTTP {(int)res.StatusCode})";
+                    return status;
+                }
+
                 if (!res.IsSuccessStatusCode)
                 {
                     status.IsValid = false;
-                    status.Message = $"HTTP 错误 ({(int)res.StatusCode})";
+                    status.IsNetworkError = false;
+                    status.Message = $"认证响应异常 (HTTP {(int)res.StatusCode})";
                     return status;
                 }
 
@@ -552,6 +606,7 @@ namespace LiveStreamGateway
                 if (code == 0 && isLogin)
                 {
                     status.IsValid = true;
+                    status.IsNetworkError = false;
                     status.Username = json?["data"]?["uname"]?.GetValue<string>() ?? "";
                     int vipStatus = json?["data"]?["vipStatus"]?.GetValue<int>() ?? 0;
                     status.Message = vipStatus == 1 ? "大会员已授权" : "已授权有效";
@@ -559,19 +614,20 @@ namespace LiveStreamGateway
                 else
                 {
                     status.IsValid = false;
+                    status.IsNetworkError = false;
                     status.Message = "Cookie已失效或未登录";
                 }
             }
             catch (Exception ex)
             {
-                status.IsValid = false;
-                status.Message = $"检测异常: {ex.Message}";
+                status.IsNetworkError = true;
+                status.Message = $"网络检测异常: {ex.Message}";
             }
 
             return status;
         }
 
-        public static async Task<PlatformCookieStatus> VerifyDouyuAsync(string? cookies)
+        public static async Task<PlatformCookieStatus> VerifyDouyuOnceAsync(string? cookies)
         {
             string clean = BaseExtractor.SanitizeAsciiHeader(cookies);
             var status = new PlatformCookieStatus
@@ -590,22 +646,27 @@ namespace LiveStreamGateway
 
             try
             {
-                using var handler = new HttpClientHandler 
-                { 
-                    UseCookies = false,
-                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                using var client = CreateHttpClient(timeoutSeconds: 8);
+                var req = new HttpRequestMessage(HttpMethod.Get, "https://www.douyu.com/wgapi/member/user/userInfo")
+                {
+                    Version = HttpVersion.Version11
                 };
-                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
-                var req = new HttpRequestMessage(HttpMethod.Get, "https://www.douyu.com/wgapi/member/user/userInfo");
-                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
                 req.Headers.TryAddWithoutValidation("Referer", "https://www.douyu.com/");
                 req.Headers.TryAddWithoutValidation("Cookie", clean);
 
                 var res = await client.SendAsync(req);
+                if ((int)res.StatusCode >= 500 || (int)res.StatusCode == 429)
+                {
+                    status.IsNetworkError = true;
+                    status.Message = $"服务端暂时不可达 (HTTP {(int)res.StatusCode})";
+                    return status;
+                }
+
                 if (!res.IsSuccessStatusCode)
                 {
                     status.IsValid = false;
-                    status.Message = $"HTTP 错误 ({(int)res.StatusCode})";
+                    status.IsNetworkError = false;
+                    status.Message = $"认证响应异常 (HTTP {(int)res.StatusCode})";
                     return status;
                 }
 
@@ -614,25 +675,27 @@ namespace LiveStreamGateway
                 if (error == 0 && json?["data"] != null)
                 {
                     status.IsValid = true;
+                    status.IsNetworkError = false;
                     status.Username = json["data"]?["nickname"]?.GetValue<string>() ?? json["data"]?["username"]?.GetValue<string>() ?? "";
                     status.Message = "已授权有效";
                 }
                 else
                 {
                     status.IsValid = false;
+                    status.IsNetworkError = false;
                     status.Message = "Cookie已失效或未登录";
                 }
             }
             catch (Exception ex)
             {
-                status.IsValid = false;
-                status.Message = $"检测异常: {ex.Message}";
+                status.IsNetworkError = true;
+                status.Message = $"网络检测异常: {ex.Message}";
             }
 
             return status;
         }
 
-        public static async Task<PlatformCookieStatus> VerifyHuyaAsync(string? cookies)
+        public static async Task<PlatformCookieStatus> VerifyHuyaOnceAsync(string? cookies)
         {
             string clean = BaseExtractor.SanitizeAsciiHeader(cookies);
             var status = new PlatformCookieStatus
@@ -651,18 +714,15 @@ namespace LiveStreamGateway
 
             try
             {
-                using var handler = new HttpClientHandler 
-                { 
-                    UseCookies = false,
-                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-                };
-                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+                using var client = CreateHttpClient(timeoutSeconds: 8);
 
                 // 优先检测 mp.huya.com 接口
                 try
                 {
-                    var req1 = new HttpRequestMessage(HttpMethod.Get, "https://mp.huya.com/cache.php?m=My");
-                    req1.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0");
+                    var req1 = new HttpRequestMessage(HttpMethod.Get, "https://mp.huya.com/cache.php?m=My")
+                    {
+                        Version = HttpVersion.Version11
+                    };
                     req1.Headers.TryAddWithoutValidation("Cookie", clean);
                     var res1 = await client.SendAsync(req1);
                     if (res1.IsSuccessStatusCode)
@@ -672,6 +732,7 @@ namespace LiveStreamGateway
                         if (status1 == 200 && json1?["data"]?["yyid"] != null)
                         {
                             status.IsValid = true;
+                            status.IsNetworkError = false;
                             status.Username = json1["data"]?["nick"]?.GetValue<string>() ?? json1["data"]?["yyid"]?.ToString() ?? "";
                             status.Message = "已授权有效";
                             return status;
@@ -683,8 +744,10 @@ namespace LiveStreamGateway
                 // 备用检测 udb.huya.com 接口
                 try
                 {
-                    var req2 = new HttpRequestMessage(HttpMethod.Get, "https://udb.huya.com/udbserver/udb/getuserinfo.php");
-                    req2.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36");
+                    var req2 = new HttpRequestMessage(HttpMethod.Get, "https://udb.huya.com/udbserver/udb/getuserinfo.php")
+                    {
+                        Version = HttpVersion.Version11
+                    };
                     req2.Headers.TryAddWithoutValidation("Referer", "https://www.huya.com/");
                     req2.Headers.TryAddWithoutValidation("Cookie", clean);
 
@@ -697,6 +760,7 @@ namespace LiveStreamGateway
                         if (code == 0)
                         {
                             status.IsValid = true;
+                            status.IsNetworkError = false;
                             status.Username = json?["nick"]?.GetValue<string>() ?? json?["yyuid"]?.ToString() ?? "";
                             status.Message = "已授权有效";
                             return status;
@@ -710,12 +774,14 @@ namespace LiveStreamGateway
                 if (matchUid.Success)
                 {
                     status.IsValid = true;
+                    status.IsNetworkError = false;
                     status.Username = $"UID: {matchUid.Groups[1].Value}";
                     status.Message = "已授权有效 (凭据包含有效UID)";
                     return status;
                 }
 
                 status.IsValid = false;
+                status.IsNetworkError = false;
                 status.Message = "Cookie已失效或未登录";
             }
             catch (Exception ex)
