@@ -168,59 +168,36 @@ function createChannelCardHtml(ch) {
     const platformName = getPlatformDisplayName(ch.platform);
 
     let statusBadgeClass = 'waiting';
-    let statusText = ch.statusMessage || '准备中';
-    let statusIconHtml = '';
+    let statusPillHtml = '';
 
-    // 状态分类判断与图标
+    const statusTitle = ch.retryCount > 0 
+        ? `${ch.statusMessage || ''} (重试 ${ch.retryCount} 次)`
+        : (ch.statusMessage || '');
+
+    // 状态分类判断与右上角小动画
     if (!ch.enable) {
         statusBadgeClass = 'disabled';
-        statusText = '已禁用';
-        statusIconHtml = `
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#64748b" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
-            </svg>
-        `;
+        statusPillHtml = `<span class="status-dot-pulse disabled"></span><span>已停用</span>`;
     } else if (ch.isLive) {
         statusBadgeClass = 'live';
-        statusText = '推流中';
-        // 动态跳动绿色声波动画图标
-        statusIconHtml = `
-            <div class="live-wave-anim" title="正在实时推流">
+        statusPillHtml = `
+            <span class="live-wave-anim" title="正在实时推流">
                 <span class="bar"></span>
                 <span class="bar"></span>
                 <span class="bar"></span>
-            </div>
+            </span>
+            <span>推流中</span>
         `;
     } else if (ch.statusMessage?.includes('未开播')) {
         statusBadgeClass = 'waiting';
-        statusText = '未开播';
-        statusIconHtml = `
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <polyline points="12 6 12 12 16 14"></polyline>
-            </svg>
-        `;
+        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>未开播</span>`;
     } else if (ch.statusMessage?.includes('Cookie') || ch.statusMessage?.includes('登录')) {
         statusBadgeClass = 'error';
-        statusText = 'Cookie失效';
-        statusIconHtml = `
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-        `;
+        statusPillHtml = `<span class="status-dot-pulse error"></span><span>Cookie失效</span>`;
     } else {
         statusBadgeClass = 'error';
-        statusText = ch.statusMessage || '异常';
-        statusIconHtml = `
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-        `;
+        const errShort = (ch.statusMessage && ch.statusMessage.length > 8) ? '异常' : (ch.statusMessage || '异常');
+        statusPillHtml = `<span class="status-dot-pulse error"></span><span>${escapeHtml(errShort)}</span>`;
     }
 
     // 平台 Cookie 状态与真伪检测状态展示
@@ -245,19 +222,18 @@ function createChannelCardHtml(ch) {
     }
 
     // 试播按钮可用状态 (只有推流中才能试播)
+    // 试播纯图标按钮 (与右侧重启/编辑/删除保持一致)
     const canPreview = ch.isLive;
     const previewBtnHtml = canPreview
-        ? `<button class="btn btn-sm btn-secondary" onclick="openPreviewModal('${ch.id}', '${escapeHtml(ch.name)}', '${ch.hlsUrl}')" title="在网页中实时试播">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        ? `<button class="btn-icon" onclick="openPreviewModal('${ch.id}', '${escapeHtml(ch.name)}', '${ch.hlsUrl}')" title="试播">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <polygon points="6 3 20 12 6 21 6 3"></polygon>
                 </svg>
-                <span>试播</span>
            </button>`
-        : `<button class="btn btn-sm btn-secondary btn-disabled" disabled title="当前未处于推流中，无法试播">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        : `<button class="btn-icon btn-disabled" disabled title="试播 (当前未推流)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <polygon points="6 3 20 12 6 21 6 3"></polygon>
                 </svg>
-                <span>试播</span>
            </button>`;
 
     return `
@@ -268,17 +244,17 @@ function createChannelCardHtml(ch) {
                         <span class="platform-pill ${platformClass}">${platformName}</span>
                         <h3 class="channel-name" title="${escapeHtml(ch.name)}">${escapeHtml(ch.name)}</h3>
                     </div>
-                    <span class="status-pill ${statusBadgeClass}">${statusText}</span>
+                    <span class="status-pill ${statusBadgeClass}" title="${escapeHtml(statusTitle)}">${statusPillHtml}</span>
                 </div>
 
                 <div class="channel-info-list">
                     <div class="info-item">
                         <span class="info-label">频道 ID:</span>
-                        <span class="info-value"><code>${escapeHtml(ch.id)}</code></span>
+                        <span class="info-value">${escapeHtml(ch.id)}</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">画质等级:</span>
-                        <span class="info-value">${ch.quality || 'OD (原画)'}</span>
+                        <span class="info-value">${escapeHtml(ch.quality || 'OD')}</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">Cookie 授权:</span>
@@ -288,12 +264,6 @@ function createChannelCardHtml(ch) {
                         <span class="info-label">源链接:</span>
                         <span class="info-value" title="${escapeHtml(ch.url)}">${escapeHtml(ch.url)}</span>
                     </div>
-                </div>
-
-                <div class="status-msg-box ${ch.isLive ? 'live' : ''}" title="${escapeHtml(ch.statusMessage)}">
-                    ${statusIconHtml}
-                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; ${ch.isLive ? 'color: #34d399; font-weight: 500;' : ''}">${escapeHtml(ch.statusMessage)}</span>
-                    ${ch.retryCount > 0 && !ch.statusMessage?.includes('未开播') ? `<span style="color: var(--danger); margin-left: auto; font-size: 11px;">(重试 ${ch.retryCount})</span>` : ''}
                 </div>
             </div>
 
@@ -593,7 +563,14 @@ async function saveChannel(event) {
 }
 
 async function deleteChannel(id, name) {
-    if (!confirm(`确定要删除频道 "${name}" 吗？此操作不可恢复。`)) return;
+    const confirmed = await showConfirm({
+        title: '删除直播频道',
+        message: `确定要删除频道 "${name}" 吗？此操作不可恢复。`,
+        okText: '确定删除',
+        cancelText: '取消',
+        type: 'danger'
+    });
+    if (!confirmed) return;
 
     try {
         const res = await fetch(`/api/channels/${encodeURIComponent(id)}`, {
@@ -837,7 +814,14 @@ async function savePlatformCookie(platform) {
 
 async function clearPlatformCookie(platform) {
     const pName = getPlatformDisplayName(platform);
-    if (!confirm(`确定要清空 ${pName} 的 Cookie 吗？关联此平台的频道将自动降级为免登录模式。`)) return;
+    const confirmed = await showConfirm({
+        title: `清空 ${pName} Cookie`,
+        message: `确定要清空 ${pName} 的 Cookie 凭据吗？关联此平台的频道将自动降级为免登录模式。`,
+        okText: '确定清空',
+        cancelText: '取消',
+        type: 'danger'
+    });
+    if (!confirmed) return;
 
     try {
         const res = await fetch(`/api/cookies/${encodeURIComponent(platform)}`, {
@@ -982,4 +966,67 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+// 统一风格自定义确认对话框 (替代原生 confirm)
+function showConfirm({
+    title = '确认操作',
+    message = '确定要执行此操作吗？',
+    okText = '确定',
+    cancelText = '取消',
+    type = 'danger' // 'danger' | 'warning' | 'primary'
+} = {}) {
+    return new Promise((resolve) => {
+        const titleEl = document.getElementById('confirm-title');
+        const msgEl = document.getElementById('confirm-message');
+        const okBtn = document.getElementById('confirm-btn-ok');
+        const cancelBtn = document.getElementById('confirm-btn-cancel');
+        const iconBox = document.getElementById('confirm-icon-box');
+
+        if (titleEl) titleEl.innerText = title;
+        if (msgEl) msgEl.innerText = message;
+        if (okBtn) okBtn.innerText = okText;
+        if (cancelBtn) cancelBtn.innerText = cancelText;
+
+        if (okBtn && iconBox) {
+            if (type === 'danger') {
+                okBtn.className = 'btn btn-danger';
+                iconBox.className = 'confirm-icon-box danger';
+            } else if (type === 'warning') {
+                okBtn.className = 'btn btn-warning';
+                iconBox.className = 'confirm-icon-box warning';
+            } else {
+                okBtn.className = 'btn btn-primary';
+                iconBox.className = 'confirm-icon-box primary';
+            }
+        }
+
+        const handleOk = () => {
+            cleanup();
+            resolve(true);
+        };
+
+        const handleCancel = () => {
+            cleanup();
+            resolve(false);
+        };
+
+        const handleKeydown = (e) => {
+            if (e.key === 'Escape') handleCancel();
+        };
+
+        const cleanup = () => {
+            okBtn?.removeEventListener('click', handleOk);
+            cancelBtn?.removeEventListener('click', handleCancel);
+            document.removeEventListener('keydown', handleKeydown);
+            closeModal('modal-confirm');
+        };
+
+        okBtn?.addEventListener('click', handleOk, { once: true });
+        cancelBtn?.addEventListener('click', handleCancel, { once: true });
+        document.addEventListener('keydown', handleKeydown);
+
+        openModal('modal-confirm');
+        okBtn?.focus();
+    });
 }

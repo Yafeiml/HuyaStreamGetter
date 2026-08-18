@@ -333,6 +333,27 @@
         </div>
     </div>
 
+    <!-- Modal: Unified Custom Confirm Dialog -->
+    <div class="modal-backdrop" id="modal-confirm">
+        <div class="modal-card modal-confirm-card">
+            <div class="confirm-icon-box danger" id="confirm-icon-box">
+                <svg id="confirm-icon-svg" viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                    <line x1="12" y1="9" x2="12" y2="13"></line>
+                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+            </div>
+            <div class="confirm-content">
+                <h3 class="confirm-title" id="confirm-title">确认操作</h3>
+                <p class="confirm-message" id="confirm-message">确定要执行此操作吗？</p>
+            </div>
+            <div class="confirm-actions">
+                <button type="button" class="btn btn-secondary" id="confirm-btn-cancel">取消</button>
+                <button type="button" class="btn btn-danger" id="confirm-btn-ok">确定</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast-container" class="toast-container"></div>
 

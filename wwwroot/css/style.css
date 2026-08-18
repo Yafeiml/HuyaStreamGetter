@@ -328,6 +328,13 @@ body {
     border-color: var(--primary);
 }
 
+.btn-icon:disabled,
+.btn-icon.btn-disabled {
+    opacity: 0.35 !important;
+    cursor: not-allowed !important;
+    pointer-events: none !important;
+}
+
 /* 旋转刷新动画 (图3) */
 @keyframes spinRefresh {
     0% { transform: rotate(0deg); }
@@ -431,26 +438,28 @@ body {
     padding: 3px 10px;
     border-radius: var(--radius-full);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
     flex-shrink: 0;
+    transition: all 0.2s ease;
 }
 
 .status-pill.live {
     background: rgba(16, 185, 129, 0.15);
-    color: var(--success);
-    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.15);
 }
 
 .status-pill.waiting {
     background: rgba(245, 158, 11, 0.15);
-    color: var(--warning);
+    color: #f59e0b;
     border: 1px solid rgba(245, 158, 11, 0.3);
 }
 
 .status-pill.error {
     background: rgba(239, 68, 68, 0.15);
-    color: var(--danger);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.35);
 }
 
 .status-pill.disabled {
@@ -459,78 +468,86 @@ body {
     border: 1px solid rgba(100, 116, 139, 0.3);
 }
 
-.channel-info-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 18px;
+/* 状态小圆点与呼吸/跳动效果 */
+.status-dot-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
 }
 
-.info-item {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
+.status-dot-pulse.waiting {
+    background: #f59e0b;
 }
 
-.info-label {
-    color: var(--text-muted);
+.status-dot-pulse.error {
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+    animation: pulse 1.5s infinite;
 }
 
-.info-value {
-    color: var(--text-secondary);
-    font-weight: 500;
-    max-width: 60%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.status-dot-pulse.disabled {
+    background: #64748b;
 }
 
-/* 状态展示盒子与动态图标 (图4) */
-.status-msg-box {
-    background: var(--bg-input);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-radius: var(--radius-sm);
-    padding: 8px 12px;
-    font-size: 12px;
-    margin-bottom: 16px;
-    color: var(--text-secondary);
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    min-height: 36px;
-}
-
-.status-msg-box.live {
-    border-color: rgba(16, 185, 129, 0.25);
-    background: rgba(16, 185, 129, 0.06);
-}
-
-/* 动态绿色跳动声波/流波形动画 (推流中专属) */
+/* 动态绿色跳动声波/流波形动画 (推流中右上角专属) */
 .live-wave-anim {
     display: inline-flex;
     align-items: flex-end;
     justify-content: center;
     gap: 2px;
-    height: 14px;
-    width: 14px;
+    height: 12px;
+    width: 12px;
     flex-shrink: 0;
 }
 
 .live-wave-anim .bar {
-    width: 2.5px;
+    width: 2px;
     background: #10b981;
-    border-radius: 2px;
+    border-radius: 1px;
     box-shadow: 0 0 4px rgba(16, 185, 129, 0.6);
     animation: barWave 1.2s ease-in-out infinite alternate;
 }
 
-.live-wave-anim .bar:nth-child(1) { height: 6px; animation-delay: 0.1s; }
-.live-wave-anim .bar:nth-child(2) { height: 14px; animation-delay: 0.35s; }
-.live-wave-anim .bar:nth-child(3) { height: 9px; animation-delay: 0.2s; }
+.live-wave-anim .bar:nth-child(1) { height: 4px; animation-delay: 0.1s; }
+.live-wave-anim .bar:nth-child(2) { height: 12px; animation-delay: 0.35s; }
+.live-wave-anim .bar:nth-child(3) { height: 7px; animation-delay: 0.2s; }
 
 @keyframes barWave {
-    0% { height: 4px; opacity: 0.5; }
-    100% { height: 14px; opacity: 1; }
+    0% { height: 3px; opacity: 0.5; }
+    100% { height: 12px; opacity: 1; }
+}
+
+.channel-info-list {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-bottom: 16px;
+}
+
+.info-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.info-label {
+    color: var(--text-muted);
+    font-weight: 400;
+    flex-shrink: 0;
+}
+
+.info-value {
+    color: var(--text-secondary);
+    font-weight: 500;
+    max-width: 65%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
 }
 
 .channel-actions {
@@ -584,6 +601,90 @@ body {
 
 .modal-card.modal-player {
     max-width: 860px;
+}
+
+.modal-card.modal-confirm-card {
+    max-width: 400px;
+    padding: 24px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+}
+
+.confirm-icon-box {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    flex-shrink: 0;
+}
+
+.confirm-icon-box.warning {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.25);
+}
+
+.confirm-icon-box.primary {
+    background: rgba(59, 130, 246, 0.12);
+    color: var(--primary);
+    border-color: rgba(59, 130, 246, 0.25);
+}
+
+.confirm-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.confirm-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.confirm-message {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.confirm-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    width: 100%;
+    margin-top: 6px;
+}
+
+.confirm-actions .btn {
+    min-width: 90px;
+    justify-content: center;
+}
+
+.btn-danger {
+    background-color: var(--danger);
+    color: #ffffff;
+}
+
+.btn-danger:hover {
+    background-color: #dc2626;
+}
+
+.btn-warning {
+    background-color: var(--warning);
+    color: #ffffff;
+}
+
+.btn-warning:hover {
+    background-color: #d97706;
 }
 
 @keyframes modalIn {
