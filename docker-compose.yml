@@ -13,8 +13,9 @@ services:
       # 持久化配置文件（保存频道列表与 Cookie 凭据）
       - ./config.json:/app/config.json
     tmpfs:
-      # 【重要优化】将切片缓存放入内存盘（128MB 足够），彻底杜绝频繁读写损坏 NAS 机械硬盘或 SSD
-      - /app/hls_stream:size=128M,mode=1777
+      # 【重要优化】将切片缓存放入内存盘，彻底杜绝频繁读写损坏 NAS 机械硬盘或 SSD
+      # 512MB 足以支持 6+ 个高码率频道同时直播（单频道约 60~100MB 切片缓存）
+      - /app/hls_stream:size=512M,mode=1777
     environment:
       - TZ=Asia/Shanghai
       - ASPNETCORE_ENVIRONMENT=Production

@@ -632,29 +632,38 @@ app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId) =>
 
         try
         {
-            // --- 确定最终要拉取的 Media Playlist URL ---
-            // 优化1：缓存已解析的子播放列表 URL，跳过主列表拉取
-            string targetUrl = freshUrl;
-            if (Globals.M3u8Cache.TryGetValue(channelId, out var existingCache) &&
-                !string.IsNullOrEmpty(existingCache.ResolvedSubPlaylistUrl))
-            {
-                // 已有缓存的子播放列表 URL，直接用（签名由 GetFreshUrl 每次重新生成）
-                // 注意：子播放列表 URL 本身也含签名，此处不能直接复用，仍需向主列表请求一次
-                // 但我们可以跳过主列表的解析逻辑，只有在子 URL 失效时才回退
-                targetUrl = freshUrl; // 下方会直接尝试子 URL
-            }
-
-            // --- 优化2：如果缓存未过期，直接返回上次结果 ---
+            // --- 优化：如果缓存未过期，直接返回上次结果 ---
             if (Globals.M3u8Cache.TryGetValue(channelId, out var cached) &&
                 (DateTime.UtcNow - cached.FetchedAt).TotalSeconds < CACHE_TTL_SECONDS)
             {
                 return Results.Content(cached.Content, "application/vnd.apple.mpegurl");
             }
 
-            // --- 缓存失效，重新向虎牙 CDN 请求 ---
+            // --- 缓存失效，向虎牙 CDN 请求 ---
+            // 【防卡顿优化】如果已有缓存的子播放列表 URL 模板，直接基于 freshUrl 构造子播放列表 URL
+            // 避免每次都先请求 Master Playlist 再解析 Sub（2 次公网 RTT → 1 次）
             string? resolvedSubUrl = null;
+            string targetUrl = freshUrl;
+            
+            if (Globals.M3u8Cache.TryGetValue(channelId, out var existingCache) &&
+                !string.IsNullOrEmpty(existingCache.ResolvedSubPlaylistUrl))
+            {
+                // 子播放列表 URL 的路径段（如 /tx.hls/xxx/stream.m3u8）与主列表共享同一个域名和签名参数
+                // freshUrl 已由 GetFreshUrl() 生成最新签名，我们取其 base 拼接已知的子路径
+                try
+                {
+                    var freshUri = new Uri(freshUrl);
+                    var subUri = new Uri(existingCache.ResolvedSubPlaylistUrl);
+                    // 使用 fresh 的 scheme+host + cached sub 的 path + fresh 的 query（签名参数）
+                    targetUrl = $"{freshUri.Scheme}://{freshUri.Host}{subUri.AbsolutePath}?{freshUri.Query.TrimStart('?')}";
+                }
+                catch
+                {
+                    targetUrl = freshUrl; // URI 解析失败时回退到主列表
+                }
+            }
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, freshUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, targetUrl);
             request.Headers.Add("User-Agent", userAgent);
             
             using var response = await Globals.HttpClient.SendAsync(request);
@@ -756,7 +765,7 @@ app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId) =>
 
 // 动态 m3u8 代理端点：读取 FFmpeg 生成的 stream.m3u8，剥除 #EXT-X-ENDLIST 标记
 // 这可以防止 Jellyfin 在 FFmpeg 重启或短暂中断时误以为直播已结束
-app.MapGet("/live/{channelId}/stream.m3u8", (string channelId) =>
+app.MapGet("/live/{channelId}/stream.m3u8", (string channelId, HttpContext ctx) =>
 {
     string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channelId, "stream.m3u8");
     if (!File.Exists(m3u8Path))
@@ -771,6 +780,11 @@ app.MapGet("/live/{channelId}/stream.m3u8", (string channelId) =>
         string content = sr.ReadToEnd();
         // 关键！剥除 #EXT-X-ENDLIST，这样 Jellyfin 永远不会认为直播结束
         content = content.Replace("#EXT-X-ENDLIST", "").TrimEnd();
+        // 【防卡顿关键】禁止所有中间层（浏览器/Jellyfin代理/Nginx/CDN）缓存 m3u8 播放列表
+        // 若被缓存，客户端拿到旧列表，旧分片播完就卡顿
+        ctx.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+        ctx.Response.Headers["Pragma"] = "no-cache";
+        ctx.Response.Headers["Expires"] = "0";
         return Results.Content(content, "application/vnd.apple.mpegurl");
     }
     catch
@@ -1246,8 +1260,11 @@ public class RenderService : BackgroundService
 
 public class StreamManagerService : BackgroundService
 {
-    private const int HEALTH_CHECK_SECONDS = 25;
-    private const int STALE_THRESHOLD_SECONDS = 90;
+    // 【防卡顿】缩短健康检测周期与僵尸流判定阈值
+    // 旧值: 25s 检测 / 90s 判死 → 僵尸流需等 90~115s 才重启
+    // 新值: 10s 检测 / 30s 判死 → 僵尸流最多 30~40s 即可自愈重启
+    private const int HEALTH_CHECK_SECONDS = 10;
+    private const int STALE_THRESHOLD_SECONDS = 30;
     private static readonly string? FFMPEG_EXE_PATH = ResolveFfmpegPath();
     
     private readonly ConcurrentDictionary<string, Process> _ffmpegProcesses = new();
@@ -1441,10 +1458,11 @@ public class StreamManagerService : BackgroundService
         string channelHlsDir = Path.Combine(Globals.HLS_FULL_PATH, channel.Id);
         try
         {
+            // 【防卡顿】重启时不再暴力清空所有 TS 分片，避免正在播放的客户端遭遇 404
+            // 只删除旧的 m3u8 播放列表，让 FFmpeg 启动后生成全新的播放列表
+            // 旧的 TS 分片会由 FFmpeg 的 -hls_flags delete_segments 自动逐步淘汰
             if (Directory.Exists(channelHlsDir) && !_ffmpegProcesses.ContainsKey(channel.Id))
             {
-                foreach (var file in Directory.GetFiles(channelHlsDir, "*.ts")) 
-                    try { File.Delete(file); } catch { }
                 foreach (var file in Directory.GetFiles(channelHlsDir, "*.m3u8*")) 
                     try { File.Delete(file); } catch { }
             }
@@ -1496,7 +1514,7 @@ public class StreamManagerService : BackgroundService
             inputUrl = $"http://127.0.0.1:{Globals.HTTP_PORT}/huya-source/{channel.Id}/stream.m3u8";
         }
 
-        Process? ffmpegProcess = StartFfmpegHls(inputUrl, channelHlsDir);
+        Process? ffmpegProcess = StartFfmpegHls(inputUrl, channelHlsDir, channel.Platform ?? "");
         if (ffmpegProcess != null)
         {
             _ffmpegProcesses[channel.Id] = ffmpegProcess;
@@ -1537,19 +1555,33 @@ public class StreamManagerService : BackgroundService
         }
     }
 
-    private Process? StartFfmpegHls(string sourceStreamUrl, string channelHlsDir)
+    private Process? StartFfmpegHls(string sourceStreamUrl, string channelHlsDir, string platform)
     {
         string m3u8Path = Path.Combine(channelHlsDir, "stream.m3u8");
         string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+        // 【防卡顿】根据平台动态匹配 Referer，避免斗鱼/虎牙 CDN 检测到跨站 Referer 触发限速/断连
+        string referer = (platform ?? "").ToLower() switch
+        {
+            "bilibili" => "https://live.bilibili.com/",
+            "huya"     => "https://www.huya.com/",
+            "douyu"    => "https://www.douyu.com/",
+            _          => "https://www.huya.com/"
+        };
+
+        // 【防卡顿】HLS 切片策略优化：
+        // -hls_time 3: 目标切片 3 秒（copy 模式下取决于关键帧，实际约 3~5s）
+        // -hls_list_size 15: 播放列表保留 15 个切片（覆盖 ~45-75s）
+        // -hls_delete_threshold 10: 额外保留 10 个旧切片再删除（总计 ~25 个切片在磁盘）
+        // 相比之前 list_size=10 threshold=5 的 ~30s 窗口，大幅扩展客户端网络抖动容错空间
         string arguments = $"-fflags +genpts+discardcorrupt -err_detect ignore_err "
             + $"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -reconnect_on_network_error 1 "
             + $"-rw_timeout 15000000 "
-            + $"-headers \"Referer: https://live.bilibili.com/\r\n\" "
+            + $"-headers \"Referer: {referer}\r\n\" "
             + $"-user_agent \"{userAgent}\" "
             + $"-i \"{sourceStreamUrl}\" "
-            + $"-c:v copy -c:a copy -sn -f hls -hls_time 2 -hls_list_size 10 -hls_allow_cache 0 "
-            + $"-hls_delete_threshold 5 "
+            + $"-c:v copy -c:a copy -sn -f hls -hls_time 3 -hls_list_size 15 -hls_allow_cache 0 "
+            + $"-hls_delete_threshold 10 "
             + $"-hls_flags delete_segments+temp_file "
             + $"\"{m3u8Path}\"";
 
@@ -1568,10 +1600,13 @@ public class StreamManagerService : BackgroundService
             var process = Process.Start(psi);
             if (process != null)
             {
+                // 【性能优化】使用常驻 StreamWriter 异步批量写入日志
+                // 替代之前的逐行 File.AppendAllText（每行都打开/关闭文件句柄），消除高频 I/O 锁竞争
                 string logFilePath = Path.Combine(channelHlsDir, "ffmpeg.log");
-                object logLock = new();
-                _ = Task.Run(() => RedirectOutputToFileAsync(process.StandardError, logFilePath, logLock));
-                _ = Task.Run(() => RedirectOutputToFileAsync(process.StandardOutput, logFilePath, logLock));
+                var logWriter = new StreamWriter(logFilePath, append: true, Encoding.UTF8) { AutoFlush = false };
+                var logSemaphore = new SemaphoreSlim(1, 1);
+                _ = Task.Run(() => RedirectOutputToFileAsync(process.StandardError, logWriter, logSemaphore));
+                _ = Task.Run(() => RedirectOutputToFileAsync(process.StandardOutput, logWriter, logSemaphore));
             }
             return process;
         }
@@ -1599,18 +1634,40 @@ public class StreamManagerService : BackgroundService
         _ffmpegProcesses.Clear();
     }
 
-    private static async Task RedirectOutputToFileAsync(StreamReader reader, string logFilePath, object logLock)
+    private static async Task RedirectOutputToFileAsync(StreamReader reader, StreamWriter writer, SemaphoreSlim semaphore)
     {
         try
         {
+            int lineCount = 0;
             while (await reader.ReadLineAsync() is string line)
             {
-                lock (logLock)
+                await semaphore.WaitAsync();
+                try
                 {
-                    File.AppendAllText(logFilePath, line + Environment.NewLine, Encoding.UTF8);
+                    await writer.WriteLineAsync(line);
+                    lineCount++;
+                    // 每 20 行刷新一次，平衡实时性与 I/O 效率
+                    if (lineCount % 20 == 0)
+                    {
+                        await writer.FlushAsync();
+                    }
+                }
+                finally
+                {
+                    semaphore.Release();
                 }
             }
         }
         catch (Exception) { }
+        finally
+        {
+            // 流结束时刷新并释放（不关闭 writer，因为 stderr 和 stdout 共享同一个 writer）
+            try 
+            { 
+                await semaphore.WaitAsync();
+                try { await writer.FlushAsync(); } finally { semaphore.Release(); }
+            }
+            catch { }
+        }
     }
 }
