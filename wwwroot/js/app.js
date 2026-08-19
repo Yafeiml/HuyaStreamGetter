@@ -145,8 +145,6 @@ function renderDashboard() {
     if (s.version) {
         const verEl = document.getElementById('app-version');
         if (verEl) verEl.innerText = s.version;
-        const footerVerEl = document.getElementById('footer-version');
-        if (footerVerEl) footerVerEl.innerText = s.version;
     }
 
     // Overview stats
@@ -187,11 +185,11 @@ function createChannelCardHtml(ch) {
         ? `${ch.statusMessage || ''} (重试 ${ch.retryCount} 次)`
         : (ch.statusMessage || '');
 
-    // 状态分类判断与右上角小动画
+    // 状态分类判断与右上角状态胶囊
     if (!ch.enable) {
         statusBadgeClass = 'disabled';
         statusPillHtml = `<span class="status-dot-pulse disabled"></span><span>已停用</span>`;
-    } else if (ch.isLive) {
+    } else if (ch.isLive || ch.channelState === 'Streaming') {
         statusBadgeClass = 'live';
         statusPillHtml = `
             <span class="live-wave-anim" title="正在实时推流">
@@ -201,18 +199,21 @@ function createChannelCardHtml(ch) {
             </span>
             <span>推流中</span>
         `;
-    } else if (ch.channelState === 'Idle') {
-        statusBadgeClass = 'waiting';
-        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>待机</span>`;
-    } else if (ch.channelState === 'Starting' || ch.channelState === 'Restarting') {
-        statusBadgeClass = 'waiting';
-        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>启动中...</span>`;
-    } else if (ch.statusMessage?.includes('未开播')) {
-        statusBadgeClass = 'waiting';
-        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>未开播</span>`;
+    } else if (ch.channelState === 'Ready' || ch.statusMessage === '已开播' || ch.statusMessage?.includes('已开播')) {
+        statusBadgeClass = 'ready';
+        statusPillHtml = `<span class="status-dot-pulse ready"></span><span>已开播</span>`;
+    } else if (ch.channelState === 'Offline' || ch.statusMessage?.includes('未开播')) {
+        statusBadgeClass = 'offline';
+        statusPillHtml = `<span class="status-dot-pulse offline"></span><span>未开播</span>`;
+    } else if (ch.channelState === 'Starting' || ch.channelState === 'Restarting' || ch.statusMessage?.includes('启动') || ch.statusMessage?.includes('重启')) {
+        statusBadgeClass = 'starting';
+        statusPillHtml = `<span class="status-dot-pulse starting"></span><span>启动中...</span>`;
     } else if (ch.statusMessage?.includes('Cookie') || ch.statusMessage?.includes('登录')) {
         statusBadgeClass = 'error';
         statusPillHtml = `<span class="status-dot-pulse error"></span><span>Cookie失效</span>`;
+    } else if (ch.statusMessage?.includes('检测中') || ch.statusMessage?.includes('初始化')) {
+        statusBadgeClass = 'waiting';
+        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>检测中...</span>`;
     } else {
         statusBadgeClass = 'error';
         const errShort = (ch.statusMessage && ch.statusMessage.length > 8) ? '异常' : (ch.statusMessage || '异常');

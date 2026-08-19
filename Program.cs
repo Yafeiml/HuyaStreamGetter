@@ -899,7 +899,8 @@ app.MapGet("/api/health", () =>
             switch (s.State)
             {
                 case ChannelState.Streaming: streaming++; break;
-                case ChannelState.Idle: idle++; break;
+                case ChannelState.Ready:
+                case ChannelState.Offline: idle++; break;
                 case ChannelState.Disabled: disabled++; break;
                 default: error++; break;
             }
@@ -981,7 +982,14 @@ static async Task<bool> LoadConfigAsync()
             Globals.ChannelStatuses.Clear();
             foreach (var channel in Globals.Config.Channels)
             {
-                Globals.ChannelStatuses.Add(new ChannelStatus { Id = channel.Id, Name = channel.Name });
+                Globals.ChannelStatuses.Add(new ChannelStatus 
+                { 
+                    Id = channel.Id, 
+                    Name = channel.Name,
+                    Message = channel.Enable ? "检测中..." : "已禁用",
+                    State = channel.Enable ? ChannelState.Offline : ChannelState.Disabled,
+                    Color = ConsoleColor.DarkGray
+                });
             }
         }
 
@@ -1179,16 +1187,20 @@ public enum ChannelState
 {
     /// <summary>频道已禁用</summary>
     Disabled,
-    /// <summary>待机：FFmpeg 未运行，等待客户端触发（OnDemand）或等待巡检启动（AlwaysOn）</summary>
-    Idle,
-    /// <summary>正在启动 FFmpeg，等待 m3u8 生成</summary>
+    /// <summary>未开播：主播离线</summary>
+    Offline,
+    /// <summary>已开播：主播在线，待机中（无客户端连接，零媒体流量消耗）</summary>
+    Ready,
+    /// <summary>启动中：客户端请求连接，正在启动 FFmpeg</summary>
     Starting,
-    /// <summary>推流中，FFmpeg 正常运行</summary>
+    /// <summary>推流中：客户端正在观看，FFmpeg 正常推流</summary>
     Streaming,
-    /// <summary>正在停止 FFmpeg（OnDemand 空闲超时或手动停止）</summary>
+    /// <summary>正在停止 FFmpeg</summary>
     Stopping,
-    /// <summary>正在重连（FFmpeg 崩溃或陈旧，正在重建会话）</summary>
-    Restarting
+    /// <summary>正在重连恢复</summary>
+    Restarting,
+    /// <summary>异常状态（Cookie失效或无法解析）</summary>
+    Error
 }
 
 public class AppConfig
@@ -1222,11 +1234,11 @@ public class ChannelStatus
 {
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
-    public string Message { get; set; } = "正在初始化...";
-    public ConsoleColor Color { get; set; } = ConsoleColor.Gray;
+    public string Message { get; set; } = "检测中...";
+    public ConsoleColor Color { get; set; } = ConsoleColor.DarkGray;
     public int RetryCount { get; set; } = 0;
     // 状态机相关
-    public ChannelState State { get; set; } = ChannelState.Idle;
+    public ChannelState State { get; set; } = ChannelState.Offline;
 }
 
 public class CookieProfileRequest
@@ -1325,7 +1337,7 @@ public static class Globals
     {
         lock (StatusLock)
         {
-            return ChannelStatuses.FirstOrDefault(c => c.Id == channelId)?.State ?? ChannelState.Idle;
+            return ChannelStatuses.FirstOrDefault(c => c.Id == channelId)?.State ?? ChannelState.Offline;
         }
     }
 
@@ -1460,6 +1472,9 @@ public class StreamManagerService : BackgroundService
     // 【OnDemand 防启动风暴】每个频道一把启动锁，保证并发首次请求只创建一个 FFmpeg
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _startupLocks = new();
 
+    // 【OnDemand 主播在线探测记录】控制待机频道探测频率，避免频繁请求上游
+    private readonly ConcurrentDictionary<string, DateTime> _lastProbeTimes = new();
+
     // 触发器：API 更新配置时立即唤醒巡检
     private readonly SemaphoreSlim _triggerSemaphore = new(0, 1);
     private DateTime _lastCookieCheckTime = DateTime.MinValue;
@@ -1489,7 +1504,7 @@ public class StreamManagerService : BackgroundService
         if (_sessions.TryRemove(channelId, out var session))
         {
             await session.DisposeAsync();
-            Globals.UpdateState(channelId, ChannelState.Idle);
+            Globals.UpdateState(channelId, ChannelState.Ready);
         }
     }
 
@@ -1502,6 +1517,7 @@ public class StreamManagerService : BackgroundService
         Globals.Extractors.TryRemove(channelId, out _);
         Globals.M3u8Cache.TryRemove(channelId, out _);
         Globals.LastClientAccessTime.TryRemove(channelId, out _);
+        _lastProbeTimes.TryRemove(channelId, out _);
     }
 
     private static string? ResolveFfmpegPath()
@@ -1634,12 +1650,53 @@ public class StreamManagerService : BackgroundService
 
                     if (!hasRecentClient)
                     {
-                        Globals.UpdateStatus(channel.Id, $"待机中（{idleTimeoutSeconds}s 无观看，已停流）", ConsoleColor.DarkYellow);
+                        Globals.UpdateStatus(channel.Id, "已开播", ConsoleColor.Cyan);
+                        Globals.UpdateState(channel.Id, ChannelState.Ready);
                         await StopSessionAsync(channel.Id);
                         hasSession = false;
                         session = null;
                         continue;
                     }
+                }
+
+                // -- OnDemand 模式且无推流会话：轻量探测主播开播状态（已开播/未开播）--
+                if (isOnDemand && !hasSession)
+                {
+                    var currentState = Globals.GetState(channel.Id);
+                    if (currentState != ChannelState.Starting && currentState != ChannelState.Restarting)
+                    {
+                        bool needProbe = !_lastProbeTimes.TryGetValue(channel.Id, out var lastProbe) ||
+                                         (DateTime.UtcNow - lastProbe).TotalSeconds >= 30;
+
+                        if (needProbe)
+                        {
+                            _lastProbeTimes[channel.Id] = DateTime.UtcNow;
+                            var (probeUrl, probeErr) = await GetSourceStreamUrlAsync(channel, stoppingToken);
+                            if (!string.IsNullOrEmpty(probeUrl))
+                            {
+                                Globals.UpdateState(channel.Id, ChannelState.Ready);
+                                Globals.UpdateStatus(channel.Id, "已开播", ConsoleColor.Cyan);
+                                status.RetryCount = 0;
+                            }
+                            else if (probeErr?.Contains("未开播") == true || probeErr?.Contains("Not Live") == true)
+                            {
+                                Globals.UpdateState(channel.Id, ChannelState.Offline);
+                                Globals.UpdateStatus(channel.Id, "未开播", ConsoleColor.DarkYellow);
+                                status.RetryCount = 0;
+                            }
+                            else if (probeErr?.Contains("Cookie") == true || probeErr?.Contains("登录") == true)
+                            {
+                                Globals.UpdateState(channel.Id, ChannelState.Error);
+                                Globals.UpdateStatus(channel.Id, "Cookie失效或需登录", ConsoleColor.Red);
+                            }
+                            else
+                            {
+                                Globals.UpdateState(channel.Id, ChannelState.Offline);
+                                Globals.UpdateStatus(channel.Id, string.IsNullOrEmpty(probeErr) ? "未开播" : probeErr, ConsoleColor.DarkYellow);
+                            }
+                        }
+                    }
+                    continue;
                 }
 
                 // -- AlwaysOn 模式：没有会话则需要启动 --
@@ -1782,7 +1839,7 @@ public class StreamManagerService : BackgroundService
         catch (Exception ex)
         {
             Globals.UpdateStatus(channel.Id, $"无法清理目录: {ex.Message}", ConsoleColor.Red);
-            Globals.UpdateState(channel.Id, ChannelState.Idle);
+            Globals.UpdateState(channel.Id, ChannelState.Error);
             return;
         }
 
@@ -1802,20 +1859,22 @@ public class StreamManagerService : BackgroundService
                 color = ConsoleColor.DarkYellow;
                 retryInc = false;
                 status.RetryCount = 0;
+                Globals.UpdateState(channel.Id, ChannelState.Offline);
             }
             else if (error?.Contains("Cookie") == true || error?.Contains("登录") == true)
             {
                 errorMsg = "Cookie失效或需登录";
                 color = ConsoleColor.Red;
+                Globals.UpdateState(channel.Id, ChannelState.Error);
             }
             else
             {
                 errorMsg = $"获取失败: {error}";
                 color = ConsoleColor.Red;
+                Globals.UpdateState(channel.Id, ChannelState.Error);
             }
 
             Globals.UpdateStatus(channel.Id, errorMsg, color, incrementRetry: retryInc);
-            Globals.UpdateState(channel.Id, ChannelState.Idle);
             var me = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
             me.ErrorCount++;
             return;
@@ -1839,7 +1898,7 @@ public class StreamManagerService : BackgroundService
         else
         {
             Globals.UpdateStatus(channel.Id, "FFmpeg 进程启动失败", ConsoleColor.Red);
-            Globals.UpdateState(channel.Id, ChannelState.Idle);
+            Globals.UpdateState(channel.Id, ChannelState.Error);
         }
     }
 
