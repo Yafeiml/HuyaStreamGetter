@@ -189,6 +189,24 @@ docker run -d \
 
 启动完成后，直接访问 `http://<NAS的IP>:9898` 即可通过 Web 界面可视化管理！
 
+> [!WARNING]
+> ### ⚠️ Windows Docker Desktop / WSL2 部署警告
+> **强烈不建议在 Windows Docker Desktop（WSL2 后端）中长期常驻运行多路直播流，尤其不要使用 `"StreamingMode": "AlwaysOn"`。**
+> 
+> **根因分析**：
+> 直播持续拉流会产生高密度的 HLS 网络请求与连接重建。Docker Desktop 的所有容器网络流量均由 Windows 宿主机进程 `com.docker.backend.exe` 转发代理。在部分 Windows 环境下，该代理层可能无法正常释放 TCP 端口和网络缓冲区，导致宿主机 `com.docker.backend.exe` 虚拟内存持续暴涨，最终引发：
+> - Windows 物理内存与虚拟分页内存耗尽（系统事件 2004 资源耗尽告警）；
+> - Docker Desktop 崩溃无响应，导致所有容器被迫中断；
+> - 宿主机 TCP 端口耗尽或系统卡死。
+> 
+> *注：该泄漏发生在 Docker Desktop 宿主机网络代理层，限制容器内存或修改 `.wslconfig` 内存上限均无法根治。*
+> 
+> **推荐运行方式**：
+> 1. **首选**：原生 Linux Docker Engine（如群晖、威联通、Unraid、飞牛 OS、TrueNAS 或 Linux 主机/软路由）；
+> 2. **次选**：Hyper-V / VMware 独立 Linux 虚拟机中的 Docker Engine；
+> 3. **Windows 个人电脑**：直接下载 Releases 页面提供的 **Windows 原生独立版 EXE**（解压即跑，不经过 Docker 代理层）；
+> 4. **若必须在 Windows Docker Desktop 中使用**：请务必保持使用默认的 **`"StreamingMode": "OnDemand"`（按需推流）**，避免无人观看时持续产生媒体流量。
+
 ---
 
 ## 🚀 本地 Windows / 源码使用说明
