@@ -94,13 +94,10 @@ body {
     box-shadow: var(--shadow-md);
 }
 
-.brand-title-wrap {
-    display: inline-flex;
+.brand-text h1 {
+    display: flex;
     align-items: baseline;
     gap: 8px;
-}
-
-.brand-text h1 {
     font-size: 20px;
     font-weight: 700;
     letter-spacing: -0.02em;
@@ -108,13 +105,14 @@ body {
     line-height: 1.2;
 }
 
-.version-tag {
+.brand-text h1 .version-tag {
     font-size: 11px;
     font-weight: 500;
     color: var(--text-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    opacity: 0.85;
+    opacity: 0.75;
     user-select: none;
+    letter-spacing: 0;
 }
 
 .brand-text .sub-title {
