@@ -1206,8 +1206,8 @@ public enum ChannelState
 public class AppConfig
 {
     public string CustomHost { get; set; } = "";
-    /// <summary>推流模式：AlwaysOn（始终推流）或 OnDemand（按需推流，无人观看时停止 FFmpeg）。默认 OnDemand</summary>
-    public string StreamingMode { get; set; } = "OnDemand";
+    /// <summary>推流模式：AlwaysOn（始终推流，默认）或 OnDemand（按需推流，无人观看时停止 FFmpeg）</summary>
+    public string StreamingMode { get; set; } = "AlwaysOn";
     /// <summary>OnDemand 模式：最后一次 m3u8 请求后多久无新请求则停止 FFmpeg（秒），默认 300 秒</summary>
     public int IdleTimeoutSeconds { get; set; } = 300;
     /// <summary>OnDemand 模式：启动 FFmpeg 后等待 m3u8 生成的超时时间（秒），默认 30 秒</summary>

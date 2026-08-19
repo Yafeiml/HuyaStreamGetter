@@ -258,7 +258,7 @@ dotnet run
 ```json
 {
   "CustomHost": "",
-  "StreamingMode": "OnDemand",
+  "StreamingMode": "AlwaysOn",
   "IdleTimeoutSeconds": 300,
   "StartupTimeoutSeconds": 30,
   "PrewarmEnabledChannels": [],
@@ -304,7 +304,7 @@ dotnet run
 #### 1. 全局核心配置项
 | 字段 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :---: | :--- |
-| `StreamingMode` | string | `"OnDemand"` | **推流模式**：<br>• `"OnDemand"`（推荐/默认）：按需推流，无客户端观看时 FFmpeg 自动待机（零媒体流量），用户打开播放时自动秒级唤醒；<br>• `"AlwaysOn"`：传统全天候常驻推流模式。 |
+| `StreamingMode` | string | `"AlwaysOn"` | **推流模式**：<br>• `"AlwaysOn"`（默认）：全天候常驻推流模式，所有启用频道保持后台持续切片转流，客户端进入零等待秒开；<br>• `"OnDemand"`：按需推流，无客户端观看时 FFmpeg 自动待机（零媒体流量），用户打开播放时自动秒级拉起（推荐用于 Windows Docker Desktop 或带宽紧张场景）。 |
 | `IdleTimeoutSeconds` | int | `300` | **空闲待机超时（秒）**：在 `OnDemand` 模式下，当最后一个播放客户端停止请求超过该秒数后，网关自动停止该频道的 FFmpeg 进程以节省带宽与系统资源。 |
 | `StartupTimeoutSeconds` | int | `30` | **启动等待超时（秒）**：在 `OnDemand` 模式下，客户端首次访问触发 FFmpeg 启动时，等待生成首个 HLS 切片播放列表的最大容忍时长。 |
 | `PrewarmEnabledChannels` | string[] | `[]` | **预热启动频道 ID 列表**：在 `OnDemand` 模式下，允许指定某些核心赛事或高频频道在程序启动时立即拉起 FFmpeg，无需等待首次播放请求。 |

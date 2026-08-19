@@ -6,12 +6,13 @@
 
 #### 核心变更
 
-1. **🆕 按需推流模式 (OnDemand) — 现为默认模式**
-   - 无人观看时 FFmpeg 自动停止（默认空闲超时 300 秒），彻底消除持续媒体流量触发 Docker Desktop 网络后端内存泄漏的根因；
+1. **🆕 新增按需推流模式 (OnDemand)**
+   - 支持 `StreamingMode` 切换（`"AlwaysOn"` 默认常驻推流 / `"OnDemand"` 按需推流）；
+   - 在 `OnDemand` 模式下无人观看时 FFmpeg 自动停止（默认空闲超时 300 秒），彻底消除持续媒体流量触发 Docker Desktop 网络后端内存泄漏的根因；
    - 客户端访问 `/live/{channelId}/stream.m3u8` 自动触发 FFmpeg 启动，启动期间返回 `503 + Retry-After`，播放器会在 5 秒后自动重试；
    - 并发首次请求使用 per-channel 启动锁，确保同一频道只创建一个 FFmpeg（防启动风暴）；
-   - 新增配置字段：`StreamingMode`（`AlwaysOn`/`OnDemand`）、`IdleTimeoutSeconds`（默认 300）、`StartupTimeoutSeconds`（默认 30）、`PrewarmEnabledChannels`（预热列表）；
-   - **完全向后兼容**：旧 `config.json` 无需修改，不含新字段时自动使用 OnDemand 默认值。
+   - 新增配置字段：`StreamingMode`（默认 `AlwaysOn`）、`IdleTimeoutSeconds`（默认 300）、`StartupTimeoutSeconds`（默认 30）、`PrewarmEnabledChannels`（预热列表）；
+   - **完全向后兼容**：旧 `config.json` 无需修改。
 
 2. **🔧 FFmpeg 资源生命周期全面修复**
    - 引入 `StreamingSession`（`IAsyncDisposable`）封装 FFmpeg 进程、日志 `StreamWriter`、`SemaphoreSlim` 和日志任务，确保每次 FFmpeg 重启后所有资源可靠释放，彻底消除文件句柄泄漏；
