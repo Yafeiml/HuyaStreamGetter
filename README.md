@@ -122,8 +122,6 @@
 在任意目录下创建 `docker-compose.yml`：
 
 ```yaml
-version: '3.8'
-
 services:
   live-stream-gateway:
     image: ghcr.io/yafeiml/livestreamgateway:latest
@@ -135,10 +133,29 @@ services:
       # 持久化配置文件（请确保本地当前目录下有 config.json，可从 config.example.json 复制）
       - ./config.json:/app/config.json
     tmpfs:
-      # 【NAS 核心保护优化】将 HLS 切片缓存挂载到系统内存（512M 足以支撑多路 1080P60 / 4K / 原画直播流并发），避免 7x24 小时读写机械硬盘导致磨损
+      # 【NAS 核心保护优化】将 HLS 切片缓存挂载到系统内存（512M 足够多路并发推流），避免读写机械硬盘导致磨损
       - /app/hls_stream:size=512M,mode=1777
     environment:
       - TZ=Asia/Shanghai
+      - ASPNETCORE_ENVIRONMENT=Production
+    # 日志轮转配置：单文件限制 50MB，最多保留 3 个文件，避免长期运行占满磁盘
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # 容器健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "http://localhost:9898/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # 内存资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 1G
 ```
 
 在同级目录下执行启动：
@@ -216,12 +233,17 @@ dotnet run
 
 ## ⚙️ 配置文件详细说明 (`config.json`)
 
-配置文件分为两大部分：**CookieProfiles（凭据池）** 与 **Channels（频道列表）**。
+配置文件包含 **全局推流与网络参数**、**CookieProfiles（凭据池）** 与 **Channels（频道列表）**。
 
 ### 完整配置示例
 
 ```json
 {
+  "CustomHost": "",
+  "StreamingMode": "OnDemand",
+  "IdleTimeoutSeconds": 300,
+  "StartupTimeoutSeconds": 30,
+  "PrewarmEnabledChannels": [],
   "CookieProfiles": {
     "huya": "guid=xxx; udb_guiddata=xxx; udb_biztoken=xxx; ...",
     "douyu": "（可选：填入斗鱼网页版 Cookie）",
@@ -261,13 +283,22 @@ dotnet run
 
 ### 字段说明表
 
-#### 1. `CookieProfiles`（可选）
+#### 1. 全局核心配置项
+| 字段 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :---: | :--- |
+| `StreamingMode` | string | `"OnDemand"` | **推流模式**：<br>• `"OnDemand"`（推荐/默认）：按需推流，无客户端观看时 FFmpeg 自动待机（零媒体流量），用户打开播放时自动秒级唤醒；<br>• `"AlwaysOn"`：传统全天候常驻推流模式。 |
+| `IdleTimeoutSeconds` | int | `300` | **空闲待机超时（秒）**：在 `OnDemand` 模式下，当最后一个播放客户端停止请求超过该秒数后，网关自动停止该频道的 FFmpeg 进程以节省带宽与系统资源。 |
+| `StartupTimeoutSeconds` | int | `30` | **启动等待超时（秒）**：在 `OnDemand` 模式下，客户端首次访问触发 FFmpeg 启动时，等待生成首个 HLS 切片播放列表的最大容忍时长。 |
+| `PrewarmEnabledChannels` | string[] | `[]` | **预热启动频道 ID 列表**：在 `OnDemand` 模式下，允许指定某些核心赛事或高频频道在程序启动时立即拉起 FFmpeg，无需等待首次播放请求。 |
+| `CustomHost` | string | `""` | **局域网真实主机 IP / 域名**：在 Docker 容器化桥接网络或通过 `localhost` 访问时，可显式指定 NAS/电脑真实 IP（如 `192.168.10.2`），生成的 M3U 与流地址将自动固定使用该地址。留空则自适应客户端 Host。可在 Web 控制台随时点击修改。 |
+
+#### 2. `CookieProfiles`（凭据池）
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `Key` (如 `huya`) | string | 平台代号（`huya` / `douyu` / `bilibili`） |
 | `Value` | string | 从浏览器 F12 抓取的直播平台完整 Cookie 字符串（配置后可直接获取最高原画/蓝光 4K 码率） |
 
-#### 2. `Channels`（频道列表）
+#### 3. `Channels`（频道列表）
 | 字段 | 类型 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
 | `Id` | string | 是 | 频道唯一英文字符串标识（用于 HLS 路由与缓存目录命名，如 `huya_eslcs`） |
