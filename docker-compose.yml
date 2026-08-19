@@ -28,7 +28,7 @@ services:
         max-file: "3"
     # 容器健康检查：每 30s 检查 /api/health，连续 3 次失败触发重启
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9898/api/health"]
+      test: ["CMD", "curl", "-f", "-s", "http://localhost:9898/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

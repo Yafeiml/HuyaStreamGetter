@@ -19,12 +19,13 @@ RUN dotnet publish "LiveStreamGateway.csproj" -c Release -o /app/publish /p:UseA
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 
-# Install FFmpeg, CA certificates and Timezone data
+# Install FFmpeg, CA certificates, Timezone data and curl (for container healthcheck)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         ca-certificates \
-        tzdata && \
+        tzdata \
+        curl && \
         rm -rf /var/lib/apt/lists/*
 
 # Set default timezone to Asia/Shanghai
