@@ -1,5 +1,5 @@
 {
-  "CustomHost": "（可选：指定局域网真实IP或域名，如 192.168.1.100，默认留空将自动根据访问客户端识别）",
+  "CustomHost": "",
   "StreamingMode": "AlwaysOn",
   "IdleTimeoutSeconds": 300,
   "StartupTimeoutSeconds": 30,

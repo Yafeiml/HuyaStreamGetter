@@ -33,12 +33,12 @@
 - **解决方案**：
   - 内置**动态透明反向代理端点** (`/huya-source/{channelId}/stream.m3u8`)。
   - **扁平化 Master Playlist (Master Playlist Flattening)**：自动解析多码率主索引，直接提取并重签底层包含实际 TS 分片的 Media Playlist，杜绝播放器/FFmpeg 绕过代理。
-  - 动态重签机制 + 1.5s 智能防抖缓存，彻底消除 CDN 重复请求与 403 过期错误。
+  - 动态重签机制按标准 URI 规则重新解析 Master/Media Playlist，并用 1.5s 防抖缓存减少重复请求；过期列表仅允许 6 秒短暂容错，避免反复播放旧片段。
 
 ### 2. ⚡ 直播边缘漂移与长时间播放变卡 (Live Edge Drift)
 - **痛点**：HLS 直播采用滑动窗口切片（Sliding Window）。当客户端网络轻微波动或解码延迟，播放位置逐渐落后于最新分片，最终请求到已被服务端删除的旧分片导致 404、严重卡顿、慢动作。
 - **解决方案**：
-  - 优化切片策略：`-hls_time 2 -hls_list_size 10 -hls_delete_threshold 5`，大幅收窄延迟漂移空间并保留安全缓冲。
+  - 稳健切片策略：`-hls_time 3 -hls_list_size 15 -hls_delete_threshold 10`；媒体序号以 Unix 时间起步，重启后分片文件名不复用，并用 `DISCONTINUITY` 与节目时间戳安全衔接新时间轴。
   - 注入 `#EXT-X-ALLOW-CACHE:NO` 标签，强制 Jellyfin 等客户端紧跟实时直播边缘。
   - 动态剥离 `#EXT-X-ENDLIST` 标记，避免推流短暂重连时播放器误判直播结束自动退出。
 

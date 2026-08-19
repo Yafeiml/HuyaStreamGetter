@@ -291,8 +291,9 @@ app.MapGet("/api/status", (HttpRequest request) =>
         {
             var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channel.Id);
             string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channel.Id, "stream.m3u8");
-            bool isStreaming = File.Exists(m3u8Path) && channel.Enable && 
-                (DateTime.Now - File.GetLastWriteTime(m3u8Path)).TotalSeconds <= 90;
+            bool isStreaming = channel.Enable &&
+                status?.State == ChannelState.Streaming &&
+                IsFreshNonEmptyFile(m3u8Path, TimeSpan.FromSeconds(Globals.HLS_MANIFEST_FRESH_SECONDS));
 
             string platformKey = (channel.Platform ?? "").ToLower();
             Globals.PlatformCookieStatuses.TryGetValue(platformKey, out var cookieStatus);
@@ -618,10 +619,12 @@ app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
     return Results.Content(m3uContent.ToString(), "application/x-mpegURL");
 });
 
-// 代理并动态重新签名虎牙 HLS 播放列表的端点。由本地 FFmpeg 调用，防止 wsSecret/wsTime 签名过期返回 403
-// 优化：缓存上一次成功的响应 1.5 秒，消除 FFmpeg 每次刷新都对虎牙 CDN 发起双重 HTTP 请求的开销
-app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId) =>
+// 代理并动态重新签名虎牙 HLS 播放列表的端点。由本地 FFmpeg 调用，防止 wsSecret/wsTime 签名过期返回 403。
+// 每次缓存过期后都从新签名的 Master Playlist 重新解析子列表，避免复用旧 CDN 路径造成域名重复拼接。
+app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId, HttpContext ctx) =>
 {
+    SetNoStoreHeaders(ctx.Response);
+
     if (Globals.Extractors.TryGetValue(channelId, out var extractor) && extractor is HuyaExtractor huyaExtractor)
     {
         string freshUrl = huyaExtractor.GetFreshUrl();
@@ -631,136 +634,77 @@ app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId) =>
             return Results.NotFound("Huya stream metadata not initialized.");
         }
 
-        const double CACHE_TTL_SECONDS = 1.5;
         string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
         try
         {
-            // --- 优化：如果缓存未过期，直接返回上次结果 ---
             if (Globals.M3u8Cache.TryGetValue(channelId, out var cached) &&
-                (DateTime.UtcNow - cached.FetchedAt).TotalSeconds < CACHE_TTL_SECONDS)
+                (DateTime.UtcNow - cached.FetchedAt).TotalSeconds < Globals.HUYA_M3U8_CACHE_TTL_SECONDS)
             {
                 return Results.Content(cached.Content, "application/vnd.apple.mpegurl");
             }
 
-            // --- 缓存失效，向虎牙 CDN 请求 ---
-            // 【防卡顿优化】如果已有缓存的子播放列表 URL 模板，直接基于 freshUrl 构造子播放列表 URL
-            // 避免每次都先请求 Master Playlist 再解析 Sub（2 次公网 RTT → 1 次）
-            string? resolvedSubUrl = null;
-            string targetUrl = freshUrl;
-            
-            if (Globals.M3u8Cache.TryGetValue(channelId, out var existingCache) &&
-                !string.IsNullOrEmpty(existingCache.ResolvedSubPlaylistUrl))
-            {
-                // 子播放列表 URL 的路径段（如 /tx.hls/xxx/stream.m3u8）与主列表共享同一个域名和签名参数
-                // freshUrl 已由 GetFreshUrl() 生成最新签名，我们取其 base 拼接已知的子路径
-                try
-                {
-                    var freshUri = new Uri(freshUrl);
-                    var subUri = new Uri(existingCache.ResolvedSubPlaylistUrl);
-                    // 使用 fresh 的 scheme+host + cached sub 的 path + fresh 的 query（签名参数）
-                    targetUrl = $"{freshUri.Scheme}://{freshUri.Host}{subUri.AbsolutePath}?{freshUri.Query.TrimStart('?')}";
-                }
-                catch
-                {
-                    targetUrl = freshUrl; // URI 解析失败时回退到主列表
-                }
-            }
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, targetUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, freshUrl);
             request.Headers.Add("User-Agent", userAgent);
-            
-            using var response = await Globals.HttpClient.SendAsync(request);
+
+            using var response = await Globals.HttpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                ctx.RequestAborted);
             if (!response.IsSuccessStatusCode)
             {
-                Console.WriteLine($"[代理错误] 虎牙服务器返回 HTTP {(int)response.StatusCode}，URL: {freshUrl}");
-                // 如果有旧缓存，降级返回旧内容而非直接报错，避免 FFmpeg 因偶发 CDN 错误中断
-                if (Globals.M3u8Cache.TryGetValue(channelId, out var staleCache))
-                {
-                    Console.WriteLine($"[代理降级] 使用过期缓存内容（{channelId}）");
-                    return Results.Content(staleCache.Content, "application/vnd.apple.mpegurl");
-                }
-                return Results.StatusCode((int)response.StatusCode);
+                return HuyaProxyFailure(channelId, $"Master Playlist 返回 HTTP {(int)response.StatusCode}");
             }
 
-            string m3u8Content = await response.Content.ReadAsStringAsync();
-            int lastSlashIndex = freshUrl.LastIndexOf('/');
-            string baseUrl = freshUrl.Substring(0, lastSlashIndex);
+            string m3u8Content = await response.Content.ReadAsStringAsync(ctx.RequestAborted);
+            Uri playlistUri = response.RequestMessage?.RequestUri ?? new Uri(freshUrl);
 
             // 若是 Master Playlist，透明地拉取子播放列表
             if (m3u8Content.Contains("#EXT-X-STREAM-INF"))
             {
-                var masterLines = m3u8Content.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-                string subPlaylistUrl = "";
-                for (int i = 0; i < masterLines.Length; i++)
+                string? subPlaylistReference = FindFirstHlsVariantReference(m3u8Content);
+                if (string.IsNullOrWhiteSpace(subPlaylistReference) ||
+                    !TryResolveHttpUri(playlistUri, subPlaylistReference, out var subPlaylistUri))
                 {
-                    if (masterLines[i].StartsWith("#EXT-X-STREAM-INF") && i + 1 < masterLines.Length)
-                    {
-                        subPlaylistUrl = masterLines[i + 1].Trim();
-                        break;
-                    }
+                    return HuyaProxyFailure(channelId, "Master Playlist 中没有有效的子播放列表");
                 }
 
-                if (!string.IsNullOrEmpty(subPlaylistUrl))
-                {
-                    if (!subPlaylistUrl.StartsWith("http"))
-                        subPlaylistUrl = $"{baseUrl}/{subPlaylistUrl}";
+                using var subRequest = new HttpRequestMessage(HttpMethod.Get, subPlaylistUri!);
+                subRequest.Headers.Add("User-Agent", userAgent);
 
-                    resolvedSubUrl = subPlaylistUrl;
+                using var subResponse = await Globals.HttpClient.SendAsync(
+                    subRequest,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    ctx.RequestAborted);
+                if (!subResponse.IsSuccessStatusCode)
+                    return HuyaProxyFailure(channelId, $"子播放列表返回 HTTP {(int)subResponse.StatusCode}");
 
-                    using var subRequest = new HttpRequestMessage(HttpMethod.Get, subPlaylistUrl);
-                    subRequest.Headers.Add("User-Agent", userAgent);
-                    
-                    using var subResponse = await Globals.HttpClient.SendAsync(subRequest);
-                    if (subResponse.IsSuccessStatusCode)
-                    {
-                        m3u8Content = await subResponse.Content.ReadAsStringAsync();
-                        freshUrl = subPlaylistUrl;
-                        lastSlashIndex = freshUrl.LastIndexOf('/');
-                        baseUrl = freshUrl.Substring(0, lastSlashIndex);
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[代理错误] 获取子播放列表失败: {subPlaylistUrl}, HTTP {(int)subResponse.StatusCode}");
-                    }
-                }
+                m3u8Content = await subResponse.Content.ReadAsStringAsync(ctx.RequestAborted);
+                playlistUri = subResponse.RequestMessage?.RequestUri ?? subPlaylistUri!;
             }
 
-            // 重写 ts 路径为绝对 URL
-            var lines = m3u8Content.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-            var rewritten = new StringBuilder();
-            foreach (var line in lines)
+            if (!m3u8Content.Contains("#EXTM3U", StringComparison.Ordinal))
             {
-                var cleanLine = line.Trim();
-                if (cleanLine.Contains(".ts?") || (cleanLine.EndsWith(".ts") && !cleanLine.StartsWith("http")))
-                {
-                    rewritten.AppendLine(cleanLine.StartsWith("http") ? cleanLine : $"{baseUrl}/{cleanLine}");
-                }
-                else
-                {
-                    rewritten.AppendLine(cleanLine);
-                }
+                return HuyaProxyFailure(channelId, "上游响应不是有效的 HLS 播放列表");
             }
 
-            string finalContent = rewritten.ToString();
+            string finalContent = RewriteHlsPlaylistUris(m3u8Content, playlistUri);
 
-            // 写入缓存
             Globals.M3u8Cache[channelId] = new M3u8CacheEntry
             {
                 Content = finalContent,
-                ResolvedSubPlaylistUrl = resolvedSubUrl,
                 FetchedAt = DateTime.UtcNow
             };
 
             return Results.Content(finalContent, "application/vnd.apple.mpegurl");
         }
+        catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
+        {
+            return Results.StatusCode(499);
+        }
         catch (Exception ex)
         {
-            Console.WriteLine($"[代理异常] 请求虎牙时发生异常: {ex.Message}");
-            // 异常时也尝试降级返回旧缓存
-            if (Globals.M3u8Cache.TryGetValue(channelId, out var staleCache))
-                return Results.Content(staleCache.Content, "application/vnd.apple.mpegurl");
-            return Results.Problem(ex.Message);
+            return HuyaProxyFailure(channelId, $"请求异常 ({ex.GetType().Name})");
         }
     }
     Console.WriteLine($"[代理错误] 找不到频道 {channelId} 的解析器。");
@@ -771,6 +715,7 @@ app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId) =>
 // OnDemand 模式：首次请求触发 FFmpeg 启动；后续请求更新最后访问时间，超时则自动停流
 app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext ctx) =>
 {
+    SetNoStoreHeaders(ctx.Response);
     string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channelId, "stream.m3u8");
 
     // 检查频道是否存在且已启用
@@ -794,12 +739,13 @@ app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext
         m.LastClientAccess = DateTime.UtcNow;
         m.M3u8RefreshCount++;
 
-        // 如果 m3u8 还不存在，说明 FFmpeg 还没启动，触发按需启动
-        if (!File.Exists(m3u8Path) || new FileInfo(m3u8Path).Length == 0)
-        {
-            if (Globals.StreamManager == null)
-                return Results.NotFound();
+        // 按实际会话与清单新鲜度判断，不能被停流后遗留的旧 m3u8 欺骗。
+        if (Globals.StreamManager == null)
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
+        if (!Globals.StreamManager.IsChannelSessionRunning(channelId) ||
+            !IsFreshNonEmptyFile(m3u8Path, TimeSpan.FromSeconds(Globals.HLS_MANIFEST_FRESH_SECONDS)))
+        {
             bool started = await Globals.StreamManager.EnsureChannelStreamingAsync(channelId, ctx.RequestAborted);
             if (!started)
             {
@@ -815,8 +761,11 @@ app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext
         m.M3u8RefreshCount++;
     }
 
-    if (!File.Exists(m3u8Path))
-        return Results.NotFound();
+    if (!IsFreshNonEmptyFile(m3u8Path, TimeSpan.FromSeconds(Globals.HLS_MANIFEST_FRESH_SECONDS)))
+    {
+        ctx.Response.Headers["Retry-After"] = "2";
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
 
     try
     {
@@ -826,21 +775,26 @@ app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext
         string m3u8Content = sr.ReadToEnd();
         // 关键！剥除 #EXT-X-ENDLIST，这样 Jellyfin 永远不会认为直播结束
         m3u8Content = m3u8Content.Replace("#EXT-X-ENDLIST", "").TrimEnd();
-        // 【防卡顿关键】禁止所有中间层（浏览器/Jellyfin代理/Nginx/CDN）缓存 m3u8 播放列表
-        ctx.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
-        ctx.Response.Headers["Pragma"] = "no-cache";
-        ctx.Response.Headers["Expires"] = "0";
         return Results.Content(m3u8Content, "application/vnd.apple.mpegurl");
     }
     catch
     {
-        return Results.NotFound();
+        ctx.Response.Headers["Retry-After"] = "1";
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
 });
 
 // .ts 分片也需要通过 /live/ 路径返回（因为 m3u8 中的路径是相对的）
-app.MapGet("/live/{channelId}/{fileName}.ts", (string channelId, string fileName) =>
+app.MapGet("/live/{channelId}/{fileName}.ts", (string channelId, string fileName, HttpContext ctx) =>
 {
+    SetNoStoreHeaders(ctx.Response);
+    if (string.IsNullOrWhiteSpace(fileName) ||
+        fileName.Contains("..", StringComparison.Ordinal) ||
+        !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
+    {
+        return Results.NotFound();
+    }
+
     string tsPath = Path.Combine(Globals.HLS_FULL_PATH, channelId, $"{fileName}.ts");
     if (!File.Exists(tsPath))
     {
@@ -1170,6 +1124,111 @@ static string GetLocalIPAddress()
     }
 }
 
+static void SetNoStoreHeaders(HttpResponse response)
+{
+    response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+    response.Headers["Pragma"] = "no-cache";
+    response.Headers["Expires"] = "0";
+}
+
+static bool IsFreshNonEmptyFile(string path, TimeSpan maxAge)
+{
+    try
+    {
+        var file = new FileInfo(path);
+        return file.Exists && file.Length > 0 && DateTime.UtcNow - file.LastWriteTimeUtc <= maxAge;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+static string? FindFirstHlsVariantReference(string playlist)
+{
+    bool expectingVariant = false;
+    foreach (string rawLine in playlist.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None))
+    {
+        string line = rawLine.Trim().TrimStart('\uFEFF');
+        if (line.StartsWith("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase))
+        {
+            expectingVariant = true;
+            continue;
+        }
+
+        if (expectingVariant && line.Length > 0 && !line.StartsWith('#'))
+            return line;
+    }
+
+    return null;
+}
+
+static bool TryResolveHttpUri(Uri baseUri, string reference, out Uri? resolvedUri)
+{
+    if (Uri.TryCreate(baseUri, reference, out var candidate) &&
+        (candidate.Scheme == Uri.UriSchemeHttp || candidate.Scheme == Uri.UriSchemeHttps))
+    {
+        resolvedUri = candidate;
+        return true;
+    }
+
+    resolvedUri = null;
+    return false;
+}
+
+static string RewriteHlsPlaylistUris(string playlist, Uri playlistUri)
+{
+    var output = new StringBuilder();
+    foreach (string rawLine in playlist.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None))
+    {
+        string line = rawLine.Trim().TrimStart('\uFEFF');
+        if (line.Equals("#EXT-X-ENDLIST", StringComparison.OrdinalIgnoreCase))
+            continue;
+
+        if (line.Length > 0 && !line.StartsWith('#'))
+        {
+            output.AppendLine(TryResolveHttpUri(playlistUri, line, out var resolved)
+                ? resolved!.AbsoluteUri
+                : line);
+            continue;
+        }
+
+        const string uriMarker = "URI=\"";
+        int markerIndex = line.IndexOf(uriMarker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex >= 0)
+        {
+            int valueStart = markerIndex + uriMarker.Length;
+            int valueEnd = line.IndexOf('"', valueStart);
+            if (valueEnd > valueStart)
+            {
+                string reference = line[valueStart..valueEnd];
+                if (TryResolveHttpUri(playlistUri, reference, out var resolved))
+                    line = string.Concat(line.AsSpan(0, valueStart), resolved!.AbsoluteUri, line.AsSpan(valueEnd));
+            }
+        }
+
+        output.AppendLine(line);
+    }
+
+    return output.ToString();
+}
+
+static IResult HuyaProxyFailure(string channelId, string reason)
+{
+    Console.WriteLine($"[代理错误] 频道 {channelId}: {reason}");
+    if (Globals.M3u8Cache.TryGetValue(channelId, out var cached))
+    {
+        double ageSeconds = (DateTime.UtcNow - cached.FetchedAt).TotalSeconds;
+        if (ageSeconds <= Globals.HUYA_STALE_CACHE_MAX_SECONDS)
+        {
+            Console.WriteLine($"[代理降级] 频道 {channelId} 使用 {ageSeconds:F1} 秒前的播放列表");
+            return Results.Content(cached.Content, "application/vnd.apple.mpegurl");
+        }
+    }
+
+    return Results.StatusCode(StatusCodes.Status502BadGateway);
+}
+
 static void ShowError(string message)
 {
     Console.ForegroundColor = ConsoleColor.Red;
@@ -1253,7 +1312,6 @@ public class CookieProfileRequest
 public class M3u8CacheEntry
 {
     public string Content { get; set; } = "";
-    public string? ResolvedSubPlaylistUrl { get; set; }
     public DateTime FetchedAt { get; set; }
 }
 
@@ -1270,9 +1328,13 @@ public class ChannelMetrics
 
 public static class Globals
 {
-    public const string APP_VERSION = "v1.5.1";
+    public const string APP_VERSION = "v1.5.2";
     public const int HTTP_PORT = 9898;
     public const string HLS_DIR = "hls_stream";
+    public const int HLS_MANIFEST_FRESH_SECONDS = 30;
+    public const int HLS_SEGMENT_RETENTION_SECONDS = 120;
+    public const double HUYA_M3U8_CACHE_TTL_SECONDS = 1.5;
+    public const double HUYA_STALE_CACHE_MAX_SECONDS = 6;
     public static readonly string HLS_FULL_PATH = Path.Combine(AppContext.BaseDirectory, HLS_DIR);
     public const string CONFIG_FILE_NAME = "config.json";
     
@@ -1489,13 +1551,46 @@ public class StreamManagerService : BackgroundService
         try { _triggerSemaphore.Release(); } catch { }
     }
 
+    /// <summary>频道是否有仍在运行的 FFmpeg 会话。</summary>
+    public bool IsChannelSessionRunning(string channelId)
+    {
+        try
+        {
+            return _sessions.TryGetValue(channelId, out var session) && !session.Process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>手动重启频道（API 调用）</summary>
     public async Task RestartChannelAsync(string channelId)
     {
-        Globals.UpdateState(channelId, ChannelState.Restarting);
-        Globals.UpdateStatus(channelId, "手动重启中...", ConsoleColor.Yellow);
-        await StopSessionAsync(channelId);
-        NotifyConfigChanged();
+        var startLock = _startupLocks.GetOrAdd(channelId, _ => new SemaphoreSlim(1, 1));
+        await startLock.WaitAsync();
+        try
+        {
+            ChannelConfig? channel;
+            lock (Globals.ConfigLock)
+                channel = Globals.Config.Channels.FirstOrDefault(c => c.Id == channelId && c.Enable);
+
+            var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channelId);
+            if (channel == null || status == null)
+                return;
+
+            Globals.UpdateState(channelId, ChannelState.Restarting);
+            Globals.UpdateStatus(channelId, "手动重启中...", ConsoleColor.Yellow);
+            await StopSessionAsync(channelId);
+            Globals.Extractors.TryRemove(channelId, out _);
+            Globals.M3u8Cache.TryRemove(channelId, out _);
+            await StartSingleChannelCoreAsync(channel, status, CancellationToken.None);
+        }
+        finally
+        {
+            startLock.Release();
+            NotifyConfigChanged();
+        }
     }
 
     /// <summary>停止并释放单个频道的 FFmpeg 会话（线程安全，正确释放所有资源）</summary>
@@ -1505,6 +1600,10 @@ public class StreamManagerService : BackgroundService
         {
             await session.DisposeAsync();
         }
+
+        // 会话停止后立即撤下旧清单；否则 OnDemand 的下一位客户端会播放停流前的时间轴。
+        RemovePublishedPlaylist(channelId);
+        CleanupOldHlsArtifacts(Path.Combine(Globals.HLS_FULL_PATH, channelId));
     }
 
     /// <summary>删除频道时调用：停止会话并清理目录和缓存</summary>
@@ -1517,6 +1616,72 @@ public class StreamManagerService : BackgroundService
         Globals.M3u8Cache.TryRemove(channelId, out _);
         Globals.LastClientAccessTime.TryRemove(channelId, out _);
         _lastProbeTimes.TryRemove(channelId, out _);
+        _startupLocks.TryRemove(channelId, out _);
+    }
+
+    private static void RemovePublishedPlaylist(string channelId)
+    {
+        string channelDir = Path.Combine(Globals.HLS_FULL_PATH, channelId);
+        try
+        {
+            if (!Directory.Exists(channelDir)) return;
+            foreach (string file in Directory.GetFiles(channelDir, "stream.m3u8*", SearchOption.TopDirectoryOnly))
+            {
+                try { File.Delete(file); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    private static void CleanupOldHlsArtifacts(string channelDir)
+    {
+        try
+        {
+            if (!Directory.Exists(channelDir)) return;
+
+            var referencedSegments = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string playlistPath = Path.Combine(channelDir, "stream.m3u8");
+            if (File.Exists(playlistPath))
+            {
+                try
+                {
+                    using var fs = new FileStream(playlistPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(fs, Encoding.UTF8);
+                    while (reader.ReadLine() is { } rawLine)
+                    {
+                        string line = rawLine.Trim();
+                        if (line.Length == 0 || line.StartsWith('#')) continue;
+                        string pathOnly = line.Split('?', 2)[0];
+                        string fileName = Path.GetFileName(pathOnly.Replace('/', Path.DirectorySeparatorChar));
+                        if (fileName.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+                            referencedSegments.Add(fileName);
+                    }
+                }
+                catch { }
+            }
+
+            DateTime cutoff = DateTime.UtcNow.AddSeconds(-Globals.HLS_SEGMENT_RETENTION_SECONDS);
+            foreach (string file in Directory.GetFiles(channelDir, "*.ts", SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    if (!referencedSegments.Contains(Path.GetFileName(file)) && File.GetLastWriteTimeUtc(file) < cutoff)
+                        File.Delete(file);
+                }
+                catch { }
+            }
+
+            foreach (string file in Directory.GetFiles(channelDir, "*.tmp", SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(file) < cutoff)
+                        File.Delete(file);
+                }
+                catch { }
+            }
+        }
+        catch { }
     }
 
     private static string? ResolveFfmpegPath()
@@ -1621,6 +1786,8 @@ public class StreamManagerService : BackgroundService
 
                 var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channel.Id);
                 if (status == null) continue;
+
+                CleanupOldHlsArtifacts(Path.Combine(Globals.HLS_FULL_PATH, channel.Id));
 
                 bool hasSession = _sessions.TryGetValue(channel.Id, out var session);
 
@@ -1816,30 +1983,37 @@ public class StreamManagerService : BackgroundService
     /// </summary>
     public async Task<bool> EnsureChannelStreamingAsync(string channelId, CancellationToken requestCancelled)
     {
-        // 快速路径：已在推流
-        if (_sessions.ContainsKey(channelId)) return true;
+        string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channelId, "stream.m3u8");
+
+        // 快速路径必须同时满足进程存活和清单新鲜；字典中残留的退出进程不能算成功。
+        if (IsChannelSessionRunning(channelId) &&
+            IsManifestFresh(m3u8Path))
+        {
+            MarkChannelStreaming(channelId);
+            return true;
+        }
 
         // 获取或创建本频道的启动锁
         var startLock = _startupLocks.GetOrAdd(channelId, _ => new SemaphoreSlim(1, 1));
 
-        // 等待锁（最多 35 秒）
+        int configuredStartupTimeout;
+        lock (Globals.ConfigLock)
+            configuredStartupTimeout = Globals.Config.StartupTimeoutSeconds;
+        int startupTimeout = configuredStartupTimeout > 0 ? configuredStartupTimeout : 30;
+
+        // 等待同频道正在进行的启动完成。
         bool lockAcquired;
-        try { lockAcquired = await startLock.WaitAsync(TimeSpan.FromSeconds(35), requestCancelled); }
+        try { lockAcquired = await startLock.WaitAsync(TimeSpan.FromSeconds(startupTimeout + 5), requestCancelled); }
         catch (OperationCanceledException) { return false; }
 
         if (!lockAcquired) return false;
 
         try
         {
-            // 双重检查
-            if (_sessions.ContainsKey(channelId)) return true;
-
             List<ChannelConfig> channels;
-            int startupTimeout;
             lock (Globals.ConfigLock)
             {
                 channels = [.. Globals.Config.Channels];
-                startupTimeout = Globals.Config.StartupTimeoutSeconds;
             }
 
             var channel = channels.FirstOrDefault(c => c.Id == channelId && c.Enable);
@@ -1848,24 +2022,46 @@ public class StreamManagerService : BackgroundService
             var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channelId);
             if (status == null) return false;
 
+            if (_sessions.TryGetValue(channelId, out var existingSession))
+            {
+                bool processRunning;
+                try { processRunning = !existingSession.Process.HasExited; }
+                catch { processRunning = false; }
+
+                if (processRunning)
+                {
+                    if (IsManifestFresh(m3u8Path))
+                    {
+                        MarkChannelStreaming(channelId);
+                        return true;
+                    }
+
+                    double remainingStartupSeconds = startupTimeout -
+                        (DateTime.UtcNow - existingSession.CreatedAtUtc).TotalSeconds;
+                    if (remainingStartupSeconds > 0 &&
+                        await WaitForFreshManifestAsync(channelId, m3u8Path, remainingStartupSeconds, requestCancelled))
+                    {
+                        MarkChannelStreaming(channelId);
+                        return true;
+                    }
+
+                    if (requestCancelled.IsCancellationRequested) return false;
+                }
+
+                // 退出进程或长时间不再更新清单：先完整释放，再启动新时间轴。
+                await StopSessionAsync(channelId);
+            }
+
             Globals.UpdateState(channelId, ChannelState.Starting);
             Globals.UpdateStatus(channelId, "客户端请求触发启动...", ConsoleColor.Cyan);
 
-            await StartSingleChannelAsync(channel, status, requestCancelled);
+            await StartSingleChannelCoreAsync(channel, status, requestCancelled);
 
-            if (!_sessions.ContainsKey(channelId)) return false;
+            if (!IsChannelSessionRunning(channelId)) return false;
 
-            // 等待 m3u8 生成（最多 startupTimeout 秒）
-            string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channelId, "stream.m3u8");
-            var deadline = DateTime.UtcNow.AddSeconds(startupTimeout);
-            while (DateTime.UtcNow < deadline)
-            {
-                if (requestCancelled.IsCancellationRequested) return false;
-                if (File.Exists(m3u8Path) && new FileInfo(m3u8Path).Length > 0)
-                    return true;
-                await Task.Delay(500, requestCancelled);
-            }
-            return File.Exists(m3u8Path) && new FileInfo(m3u8Path).Length > 0;
+            bool manifestReady = await WaitForFreshManifestAsync(channelId, m3u8Path, startupTimeout, requestCancelled);
+            if (manifestReady) MarkChannelStreaming(channelId);
+            return manifestReady;
         }
         catch (OperationCanceledException) { return false; }
         finally
@@ -1874,18 +2070,84 @@ public class StreamManagerService : BackgroundService
         }
     }
 
+    private static void MarkChannelStreaming(string channelId)
+    {
+        if (Globals.GetState(channelId) != ChannelState.Streaming)
+            Globals.UpdateState(channelId, ChannelState.Streaming);
+        Globals.UpdateStatus(channelId, "推流中", ConsoleColor.Green);
+        lock (Globals.StatusLock)
+        {
+            var status = Globals.ChannelStatuses.FirstOrDefault(s => s.Id == channelId);
+            if (status != null) status.RetryCount = 0;
+        }
+    }
+
+    private async Task<bool> WaitForFreshManifestAsync(
+        string channelId,
+        string m3u8Path,
+        double timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Max(0.5, timeoutSeconds));
+        while (DateTime.UtcNow < deadline)
+        {
+            if (cancellationToken.IsCancellationRequested) return false;
+            if (IsManifestFresh(m3u8Path)) return true;
+            if (!IsChannelSessionRunning(channelId)) return false;
+            await Task.Delay(250, cancellationToken);
+        }
+
+        return IsManifestFresh(m3u8Path);
+    }
+
+    private static bool IsManifestFresh(string m3u8Path)
+    {
+        try
+        {
+            var file = new FileInfo(m3u8Path);
+            return file.Exists && file.Length > 0 &&
+                DateTime.UtcNow - file.LastWriteTimeUtc <= TimeSpan.FromSeconds(Globals.HLS_MANIFEST_FRESH_SECONDS);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private async Task StartSingleChannelAsync(ChannelConfig channel, ChannelStatus status, CancellationToken ct)
+    {
+        var startLock = _startupLocks.GetOrAdd(channel.Id, _ => new SemaphoreSlim(1, 1));
+        try
+        {
+            await startLock.WaitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        try
+        {
+            if (IsChannelSessionRunning(channel.Id)) return;
+            if (_sessions.ContainsKey(channel.Id))
+                await StopSessionAsync(channel.Id);
+            await StartSingleChannelCoreAsync(channel, status, ct);
+        }
+        finally
+        {
+            startLock.Release();
+        }
+    }
+
+    private async Task StartSingleChannelCoreAsync(ChannelConfig channel, ChannelStatus status, CancellationToken ct)
     {
         string channelHlsDir = Path.Combine(Globals.HLS_FULL_PATH, channel.Id);
         try
         {
-            // 只删除旧的 m3u8 播放列表，保留已有 TS 分片避免播放端 404
-            if (Directory.Exists(channelHlsDir) && !_sessions.ContainsKey(channel.Id))
-            {
-                foreach (var file in Directory.GetFiles(channelHlsDir, "*.m3u8*"))
-                    try { File.Delete(file); } catch { }
-            }
             Directory.CreateDirectory(channelHlsDir);
+            RemovePublishedPlaylist(channel.Id);
+            CleanupOldHlsArtifacts(channelHlsDir);
+            Globals.M3u8Cache.TryRemove(channel.Id, out _);
         }
         catch (Exception ex)
         {
@@ -1987,6 +2249,7 @@ public class StreamManagerService : BackgroundService
     private static StreamingSession? CreateSession(string sourceStreamUrl, string channelHlsDir, string platform)
     {
         string m3u8Path = Path.Combine(channelHlsDir, "stream.m3u8");
+        string segmentPath = Path.Combine(channelHlsDir, "segment_%010d.ts");
         string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
         string referer = (platform ?? "").ToLower() switch
@@ -2004,8 +2267,9 @@ public class StreamManagerService : BackgroundService
             + $"-user_agent \"{userAgent}\" "
             + $"-i \"{sourceStreamUrl}\" "
             + $"-c:v copy -c:a copy -sn -f hls -hls_time 3 -hls_list_size 15 -hls_allow_cache 0 "
-            + $"-hls_delete_threshold 10 "
-            + $"-hls_flags delete_segments+temp_file "
+            + $"-hls_delete_threshold 10 -hls_start_number_source epoch "
+            + $"-hls_segment_filename \"{segmentPath}\" "
+            + $"-hls_flags delete_segments+temp_file+discont_start+program_date_time "
             + $"\"{m3u8Path}\"";
 
         var psi = new ProcessStartInfo

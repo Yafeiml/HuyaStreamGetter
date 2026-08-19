@@ -9,6 +9,14 @@ let appState = {
     cookieEditors: { huya: false, douyu: false, bilibili: false },
     editingChannelId: null,
     hlsPlayer: null,
+    hlsRetryTimer: null,
+    hlsStallTimer: null,
+    previewToken: 0,
+    previewUrl: null,
+    previewRecoveryAttempts: 0,
+    previewMediaRecoveries: 0,
+    previewLastProgressAt: 0,
+    previewLastTime: 0,
     pollTimer: null,
     urlDebounceTimer: null
 };
@@ -892,54 +900,208 @@ function openPreviewModal(id, name, relativeHlsUrl) {
     urlDisplay.innerText = fullUrl;
 
     openModal('modal-preview');
+    resetPreviewPlayback();
 
-    if (Hls.isSupported()) {
-        if (appState.hlsPlayer) {
-            appState.hlsPlayer.destroy();
-        }
-        const hls = new Hls({
-            enableWorker: true,
-            lowLatencyMode: true,
-            maxBufferLength: 10,
-            liveSyncDurationCount: 2
-        });
-        appState.hlsPlayer = hls;
+    const token = ++appState.previewToken;
+    appState.previewUrl = fullUrl;
+    appState.previewRecoveryAttempts = 0;
+    appState.previewMediaRecoveries = 0;
+    appState.previewLastProgressAt = performance.now();
+    appState.previewLastTime = 0;
 
-        hls.loadSource(fullUrl);
-        hls.attachMedia(video);
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            video.play().catch(() => {});
-        });
-
-        hls.on(Hls.Events.ERROR, (event, data) => {
-            if (data.fatal) {
-                errorMsg.innerText = `播放出错: ${data.details} (流可能尚未生成完毕或正在启动)`;
-                errorMsg.style.display = 'block';
-            }
-        });
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+        createHlsPreviewPlayer(fullUrl, token);
+        startPreviewStallMonitor(token);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         // Native Safari / iOS HLS support
         video.src = fullUrl;
-        video.addEventListener('loadedmetadata', () => {
+        video.onloadedmetadata = () => {
             video.play().catch(() => {});
-        });
+        };
+        video.onstalled = () => recoverNativePreview(video);
+        video.onerror = () => {
+            if (token !== appState.previewToken) return;
+            errorMsg.innerText = '直播连接中断，正在重新加载...';
+            errorMsg.style.display = 'block';
+            window.clearTimeout(appState.hlsRetryTimer);
+            appState.hlsRetryTimer = window.setTimeout(() => {
+                if (token !== appState.previewToken) return;
+                video.src = fullUrl;
+                video.load();
+                video.play().catch(() => {});
+            }, 1500);
+        };
     } else {
         errorMsg.innerText = '当前浏览器不支持 HLS 视频直接播放，请复制链接到外部播放器观看。';
         errorMsg.style.display = 'block';
     }
 }
 
-function closePreviewModal() {
+function createHlsPreviewPlayer(fullUrl, token) {
     const video = document.getElementById('preview-video');
-    if (video) {
-        video.pause();
-        video.src = '';
-    }
+    const errorMsg = document.getElementById('player-error-msg');
+    if (!video || token !== appState.previewToken) return;
+
     if (appState.hlsPlayer) {
         appState.hlsPlayer.destroy();
         appState.hlsPlayer = null;
     }
+
+    const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        backBufferLength: 30,
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 8,
+        manifestLoadingTimeOut: 10000,
+        manifestLoadingMaxRetry: 4,
+        manifestLoadingRetryDelay: 1000,
+        levelLoadingTimeOut: 10000,
+        levelLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 6
+    });
+    appState.hlsPlayer = hls;
+
+    hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        if (token === appState.previewToken) hls.loadSource(fullUrl);
+    });
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (token !== appState.previewToken) return;
+        window.clearTimeout(appState.hlsRetryTimer);
+        appState.hlsRetryTimer = null;
+        errorMsg.style.display = 'none';
+        video.play().catch(() => {});
+    });
+
+    hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        if (token !== appState.previewToken) return;
+        window.clearTimeout(appState.hlsRetryTimer);
+        appState.hlsRetryTimer = null;
+        appState.previewRecoveryAttempts = 0;
+        appState.previewMediaRecoveries = 0;
+        appState.previewLastProgressAt = performance.now();
+        errorMsg.style.display = 'none';
+    });
+
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (token !== appState.previewToken) return;
+
+        if (!data.fatal) {
+            if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR)
+                recoverHlsPreviewToLiveEdge(hls, video);
+            return;
+        }
+
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            scheduleHlsPreviewReload(fullUrl, token, `直播网络中断 (${data.details})`);
+            return;
+        }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && appState.previewMediaRecoveries < 2) {
+            appState.previewMediaRecoveries++;
+            errorMsg.innerText = `媒体解码异常，正在恢复 (${data.details})...`;
+            errorMsg.style.display = 'block';
+            hls.recoverMediaError();
+            return;
+        }
+
+        scheduleHlsPreviewReload(fullUrl, token, `播放中断 (${data.details})`);
+    });
+
+    video.onstalled = () => recoverHlsPreviewToLiveEdge(hls, video);
+    hls.attachMedia(video);
+}
+
+function scheduleHlsPreviewReload(fullUrl, token, reason) {
+    if (token !== appState.previewToken || appState.hlsRetryTimer) return;
+
+    const errorMsg = document.getElementById('player-error-msg');
+    appState.previewRecoveryAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, Math.min(appState.previewRecoveryAttempts - 1, 3)), 8000);
+    errorMsg.innerText = `${reason}，${Math.ceil(delay / 1000)} 秒后重新连接...`;
+    errorMsg.style.display = 'block';
+
+    appState.hlsRetryTimer = window.setTimeout(() => {
+        appState.hlsRetryTimer = null;
+        if (token !== appState.previewToken) return;
+        createHlsPreviewPlayer(fullUrl, token);
+    }, delay);
+}
+
+function recoverHlsPreviewToLiveEdge(hls, video) {
+    if (!hls || !video || video.paused) return;
+
+    const livePosition = hls.liveSyncPosition;
+    if (Number.isFinite(livePosition) && livePosition - video.currentTime > 12) {
+        try { video.currentTime = Math.max(0, livePosition - 1); } catch (_) {}
+    }
+
+    try { hls.startLoad(); } catch (_) {}
+    video.play().catch(() => {});
+    appState.previewLastProgressAt = performance.now();
+}
+
+function recoverNativePreview(video) {
+    if (!video || video.paused) return;
+    try {
+        if (video.seekable.length > 0) {
+            const liveEdge = video.seekable.end(video.seekable.length - 1);
+            if (liveEdge - video.currentTime > 12)
+                video.currentTime = Math.max(0, liveEdge - 1);
+        }
+        video.play().catch(() => {});
+    } catch (_) {}
+}
+
+function startPreviewStallMonitor(token) {
+    window.clearInterval(appState.hlsStallTimer);
+    appState.hlsStallTimer = window.setInterval(() => {
+        if (token !== appState.previewToken) return;
+        const video = document.getElementById('preview-video');
+        const hls = appState.hlsPlayer;
+        if (!video || !hls || video.paused) return;
+
+        if (video.currentTime > appState.previewLastTime + 0.1) {
+            appState.previewLastTime = video.currentTime;
+            appState.previewLastProgressAt = performance.now();
+            return;
+        }
+
+        if (performance.now() - appState.previewLastProgressAt >= 8000)
+            recoverHlsPreviewToLiveEdge(hls, video);
+    }, 2000);
+}
+
+function resetPreviewPlayback() {
+    window.clearTimeout(appState.hlsRetryTimer);
+    window.clearInterval(appState.hlsStallTimer);
+    appState.hlsRetryTimer = null;
+    appState.hlsStallTimer = null;
+
+    if (appState.hlsPlayer) {
+        appState.hlsPlayer.destroy();
+        appState.hlsPlayer = null;
+    }
+
+    const video = document.getElementById('preview-video');
+    if (video) {
+        video.onloadedmetadata = null;
+        video.onstalled = null;
+        video.onerror = null;
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+    }
+}
+
+function closePreviewModal() {
+    appState.previewToken++;
+    appState.previewUrl = null;
+    resetPreviewPlayback();
     closeModal('modal-preview');
 }
 
