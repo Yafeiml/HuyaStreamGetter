@@ -141,6 +141,14 @@ function renderDashboard() {
 
     const s = appState.status;
 
+    // Version display
+    if (s.version) {
+        const verEl = document.getElementById('app-version');
+        if (verEl) verEl.innerText = s.version;
+        const footerVerEl = document.getElementById('footer-version');
+        if (footerVerEl) footerVerEl.innerText = s.version;
+    }
+
     // Overview stats
     document.getElementById('stat-active-streams').innerText = `${s.activeStreams} / ${s.totalChannels}`;
     document.getElementById('stat-uptime').innerText = s.uptimeText || '刚刚启动';

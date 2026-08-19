@@ -326,6 +326,7 @@ app.MapGet("/api/status", (HttpRequest request) =>
 
     return Results.Json(new
     {
+        version = Globals.APP_VERSION,
         serverStatus = "运行中",
         localIp = clientHost,
         httpPort = request.Host.Port ?? Globals.HTTP_PORT,
@@ -906,6 +907,7 @@ app.MapGet("/api/health", () =>
     }
     return Results.Json(new
     {
+        version = Globals.APP_VERSION,
         status = "healthy",
         streaming,
         idle,
@@ -1256,6 +1258,7 @@ public class ChannelMetrics
 
 public static class Globals
 {
+    public const string APP_VERSION = "v1.5.0";
     public const int HTTP_PORT = 9898;
     public const string HLS_DIR = "hls_stream";
     public static readonly string HLS_FULL_PATH = Path.Combine(AppContext.BaseDirectory, HLS_DIR);

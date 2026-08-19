@@ -94,11 +94,32 @@ body {
     box-shadow: var(--shadow-md);
 }
 
+.brand-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .brand-text h1 {
     font-size: 20px;
     font-weight: 700;
     letter-spacing: -0.02em;
     color: var(--text-primary);
+}
+
+.version-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 3px 7px;
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    color: #60a5fa;
+    border-radius: var(--radius-sm);
+    letter-spacing: 0.02em;
+    user-select: none;
 }
 
 .brand-text .sub-title {
@@ -1237,4 +1258,55 @@ textarea:focus {
     .form-row { grid-template-columns: 1fr; gap: 14px; }
     .content-toolbar { flex-direction: column; align-items: stretch; }
     .toolbar-right { justify-content: flex-start; flex-wrap: wrap; }
+}
+
+/* App Footer */
+.app-footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.footer-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.footer-brand {
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.footer-version-tag {
+    font-size: 11px;
+    padding: 2px 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.footer-divider {
+    color: var(--border-color);
+    font-size: 10px;
+}
+
+.footer-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.2s;
+}
+
+.footer-link:hover {
+    color: var(--text-primary);
 }
