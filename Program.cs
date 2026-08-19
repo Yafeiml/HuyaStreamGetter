@@ -1504,7 +1504,6 @@ public class StreamManagerService : BackgroundService
         if (_sessions.TryRemove(channelId, out var session))
         {
             await session.DisposeAsync();
-            Globals.UpdateState(channelId, ChannelState.Ready);
         }
     }
 
@@ -1703,8 +1702,16 @@ public class StreamManagerService : BackgroundService
                 if (!isOnDemand && !hasSession)
                 {
                     var currentState = Globals.GetState(channel.Id);
-                    if (currentState != ChannelState.Starting && currentState != ChannelState.Restarting)
+                    var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
+                    // 自愈保护：若因异常卡在 Starting/Restarting 超过 30 秒，强制解除并尝试重新拉起
+                    bool isStuckStarting = (currentState == ChannelState.Starting || currentState == ChannelState.Restarting) &&
+                                           metrics.LastStateChange.HasValue &&
+                                           (DateTime.UtcNow - metrics.LastStateChange.Value).TotalSeconds > 30;
+
+                    if (currentState != ChannelState.Starting && currentState != ChannelState.Restarting || isStuckStarting)
+                    {
                         await StartSingleChannelAsync(channel, status, stoppingToken);
+                    }
                     continue;
                 }
 
@@ -1723,14 +1730,16 @@ public class StreamManagerService : BackgroundService
                     else
                     {
                         string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channel.Id, "stream.m3u8");
-                        if (File.Exists(m3u8Path))
+                        bool m3u8Exists = File.Exists(m3u8Path) && new FileInfo(m3u8Path).Length > 0;
+
+                        if (m3u8Exists)
                         {
                             var lastWrite = File.GetLastWriteTimeUtc(m3u8Path);
                             if ((DateTime.UtcNow - lastWrite).TotalSeconds > STALE_THRESHOLD_SECONDS)
                             {
                                 var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
                                 metrics.RestartCount++;
-                                Globals.UpdateStatus(channel.Id, "HLS 文件陈旧（僵尸进程），正在强制重启...", ConsoleColor.Red);
+                                Globals.UpdateStatus(channel.Id, "HLS 文件陈旧（推流卡死），正在强制重启...", ConsoleColor.Red);
                                 Globals.UpdateState(channel.Id, ChannelState.Restarting);
                                 await StopSessionAsync(channel.Id);
                                 await StartSingleChannelAsync(channel, status, stoppingToken);
@@ -1740,6 +1749,48 @@ public class StreamManagerService : BackgroundService
                                 Globals.UpdateStatus(channel.Id, "推流中", ConsoleColor.Green);
                                 Globals.UpdateState(channel.Id, ChannelState.Streaming);
                                 status.RetryCount = 0;
+                            }
+                        }
+                        else
+                        {
+                            // stream.m3u8 尚未生成或为空：检查是否启动超时
+                            int startupTimeout = Globals.Config.StartupTimeoutSeconds > 0 ? Globals.Config.StartupTimeoutSeconds : 30;
+                            if ((DateTime.UtcNow - session.CreatedAtUtc).TotalSeconds > startupTimeout)
+                            {
+                                var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
+                                metrics.ErrorCount++;
+
+                                // 终止卡死/无响应的 FFmpeg 会话
+                                await StopSessionAsync(channel.Id);
+
+                                // 探测上游直播源是否已下播或鉴权失效
+                                var (probeUrl, probeErr) = await GetSourceStreamUrlAsync(channel, stoppingToken);
+                                if (string.IsNullOrEmpty(probeUrl))
+                                {
+                                    if (probeErr?.Contains("未开播") == true || probeErr?.Contains("Not Live") == true)
+                                    {
+                                        Globals.UpdateStatus(channel.Id, "未开播", ConsoleColor.DarkYellow);
+                                        Globals.UpdateState(channel.Id, ChannelState.Offline);
+                                        status.RetryCount = 0;
+                                    }
+                                    else if (probeErr?.Contains("Cookie") == true || probeErr?.Contains("登录") == true)
+                                    {
+                                        Globals.UpdateStatus(channel.Id, "Cookie失效或需登录", ConsoleColor.Red);
+                                        Globals.UpdateState(channel.Id, ChannelState.Error);
+                                    }
+                                    else
+                                    {
+                                        Globals.UpdateStatus(channel.Id, $"获取源失败: {probeErr}", ConsoleColor.Red);
+                                        Globals.UpdateState(channel.Id, ChannelState.Error);
+                                    }
+                                }
+                                else
+                                {
+                                    // 上游在线但推流进程启动超时，触发重启重试
+                                    Globals.UpdateStatus(channel.Id, "推流启动超时，正在重试...", ConsoleColor.Yellow);
+                                    Globals.UpdateState(channel.Id, ChannelState.Restarting);
+                                    await StartSingleChannelAsync(channel, status, stoppingToken);
+                                }
                             }
                         }
                     }
@@ -1992,6 +2043,7 @@ public class StreamManagerService : BackgroundService
 public sealed class StreamingSession : IAsyncDisposable
 {
     public Process Process { get; }
+    public DateTime CreatedAtUtc { get; } = DateTime.UtcNow;
     private readonly StreamWriter _logWriter;
     private readonly SemaphoreSlim _logSemaphore;
     private readonly CancellationTokenSource _cts;
