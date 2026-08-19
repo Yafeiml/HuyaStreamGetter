@@ -193,6 +193,12 @@ function createChannelCardHtml(ch) {
             </span>
             <span>推流中</span>
         `;
+    } else if (ch.channelState === 'Idle') {
+        statusBadgeClass = 'waiting';
+        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>待机</span>`;
+    } else if (ch.channelState === 'Starting' || ch.channelState === 'Restarting') {
+        statusBadgeClass = 'waiting';
+        statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>启动中...</span>`;
     } else if (ch.statusMessage?.includes('未开播')) {
         statusBadgeClass = 'waiting';
         statusPillHtml = `<span class="status-dot-pulse waiting"></span><span>未开播</span>`;

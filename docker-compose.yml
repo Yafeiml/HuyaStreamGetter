@@ -14,8 +14,27 @@ services:
       - ./config.json:/app/config.json
     tmpfs:
       # 【重要优化】将切片缓存放入内存盘，彻底杜绝频繁读写损坏 NAS 机械硬盘或 SSD
-      # 512MB 足以支持 6+ 个高码率频道同时直播（单频道约 60~100MB 切片缓存）
+      # OnDemand 模式下单次最多 2~3 个频道同时推流，512MB 绰绰有余
       - /app/hls_stream:size=512M,mode=1777
     environment:
       - TZ=Asia/Shanghai
       - ASPNETCORE_ENVIRONMENT=Production
+    # 【重要】日志轮转：限制 json-file 驱动单文件 50MB、最多保留 3 个文件
+    # 避免长期运行后日志文件无限增长占满磁盘
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # 容器健康检查：每 30s 检查 /api/health，连续 3 次失败触发重启
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9898/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # 内存上限：防止应用层内存泄漏引发 OOM 无限占用（1GB 足以覆盖多频道并发场景）
+    deploy:
+      resources:
+        limits:
+          memory: 1G
