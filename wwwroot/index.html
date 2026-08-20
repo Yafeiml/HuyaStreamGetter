@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LiveStreamGateway - 全平台直播流聚合中继网关</title>
-    <link rel="stylesheet" href="css/style.css?v=1.5.5">
+    <link rel="stylesheet" href="css/style.css?v=1.5.6">
     <!-- Hls.js for live preview player -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
 </head>
@@ -20,9 +20,27 @@
                 </svg>
             </div>
             <h1>LiveStreamGateway</h1>
-            <p class="auth-subtitle">登录管理控制台</p>
-            <form id="form-login" class="auth-form">
-                <div class="auth-password-field">
+            <p class="auth-subtitle" id="auth-subtitle">正在检查管理状态...</p>
+            <div class="auth-setup-message" id="auth-setup-message" hidden>
+                <strong>✨ 首次使用引导</strong>
+                <span id="auth-setup-message-detail">正在准备管理员密码设置...</span>
+            </div>
+            <form id="form-login" class="auth-form" hidden>
+                <div class="auth-setup-code-group" id="auth-setup-code-group" hidden>
+                    <div class="auth-password-field auth-setup-code-field">
+                        <span class="auth-password-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="7.5" cy="15.5" r="5.5"></circle>
+                                <path d="M12 12l8-8"></path>
+                                <path d="M15 7l2 2"></path>
+                                <path d="M17 5l2 2"></path>
+                            </svg>
+                        </span>
+                        <input type="text" id="auth-setup-code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" aria-label="一次性初始化码" placeholder="输入本次启动日志中的一次性初始化码">
+                    </div>
+                    <p class="auth-field-hint">在本次启动的服务日志中复制“首次设置验证码”（Docker / NAS 为容器日志）</p>
+                </div>
+                <div class="auth-password-field" id="auth-primary-password-field">
                     <span class="auth-password-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="5" y="10" width="14" height="10" rx="2"></rect>
@@ -44,14 +62,32 @@
                         </svg>
                     </button>
                 </div>
+                <div class="auth-password-field" id="auth-confirm-password-group" hidden>
+                    <span class="auth-password-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M20 6L9 17l-5-5"></path>
+                        </svg>
+                    </span>
+                    <input type="password" id="auth-confirm-password" autocomplete="new-password" minlength="12" maxlength="256" aria-label="确认管理员密码" placeholder="再次输入管理员密码">
+                    <button type="button" class="auth-password-toggle" id="btn-toggle-confirm-password" aria-label="显示确认密码" aria-pressed="false" title="显示确认密码">
+                        <svg class="password-eye-open" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                        <svg class="password-eye-closed" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M3 3l18 18"></path>
+                            <path d="M10.6 10.7a2 2 0 0 0 2.7 2.7"></path>
+                            <path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c6.5 0 10 7 10 7a18 18 0 0 1-2.1 3"></path>
+                            <path d="M6.6 6.6C3.5 8.5 2 12 2 12s3.5 7 10 7a10.8 10.8 0 0 0 5.4-1.4"></path>
+                        </svg>
+                    </button>
+                </div>
+                <p class="auth-password-hint" id="auth-password-hint" hidden>密码长度为 12～256 个字符，请勿复用 SSH、root 或直播平台密码</p>
                 <div class="auth-error" id="login-error" role="alert"></div>
                 <button type="submit" class="btn btn-primary auth-submit" id="btn-login">登录</button>
             </form>
-            <div class="auth-setup-message" id="auth-setup-message" hidden>
-                管理员密码尚未初始化。请在服务器本机通过 <code>/api/auth/setup</code> 完成首次设置。
-            </div>
             <div class="auth-transport-warning" id="auth-transport-warning" hidden>
-                ⚠️ 当前使用 HTTP，请仅在可信局域网中登录；跨不可信网络请配置 HTTPS 反向代理。
+                ⚠️ 当前使用 HTTP，请仅在可信局域网中设置或登录；跨不可信网络请配置 HTTPS 反向代理。
             </div>
         </div>
     </div>
@@ -69,7 +105,7 @@
                 <div class="brand-text">
                     <h1>
                         <a href="https://github.com/Yafeiml/LiveStreamGateway" target="_blank" rel="noopener noreferrer" class="brand-title-link" title="前往 GitHub 项目主页">LiveStreamGateway</a>
-                        <span class="version-tag" id="app-version">v1.5.5</span>
+                        <span class="version-tag" id="app-version">v1.5.6</span>
                     </h1>
                     <span class="sub-title">多平台直播中继与 IPTV 转换服务</span>
                 </div>
@@ -511,6 +547,6 @@
     <!-- Toast Notification -->
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="js/app.js?v=1.5.5"></script>
+    <script src="js/app.js?v=1.5.6"></script>
 </body>
 </html>

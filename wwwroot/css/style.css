@@ -1341,6 +1341,7 @@ input[type="search"]:-webkit-autofill {
     align-items: center;
     justify-content: center;
     padding: 20px;
+    overflow-y: auto;
     background:
         radial-gradient(circle at 20% 15%, rgba(59, 130, 246, 0.16), transparent 34%),
         radial-gradient(circle at 80% 85%, rgba(14, 165, 233, 0.10), transparent 32%),
@@ -1354,11 +1355,36 @@ input[type="search"]:-webkit-autofill {
 
 .auth-card {
     width: min(420px, 100%);
+    margin: auto;
     padding: 34px;
     border: 1px solid var(--border-color);
     border-radius: var(--radius-lg);
     background: linear-gradient(145deg, rgba(25, 35, 54, 0.98), rgba(15, 23, 42, 0.98));
     box-shadow: var(--shadow-lg), 0 24px 70px rgba(0, 0, 0, 0.35);
+}
+
+.auth-card.setup-mode {
+    width: min(460px, 100%);
+    padding: 26px 34px;
+}
+
+.auth-card.setup-mode .auth-brand-icon {
+    width: 56px;
+    height: 56px;
+    margin-bottom: 12px;
+    border-radius: 16px;
+}
+
+.auth-card.setup-mode .auth-subtitle {
+    margin-bottom: 18px;
+}
+
+.auth-card.setup-mode .auth-setup-message {
+    margin-bottom: 12px;
+}
+
+.auth-gate [hidden] {
+    display: none !important;
 }
 
 .auth-brand-icon {
@@ -1392,6 +1418,12 @@ input[type="search"]:-webkit-autofill {
     display: flex;
     flex-direction: column;
     gap: 12px;
+}
+
+.auth-setup-code-group {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
 }
 
 .auth-password-field {
@@ -1459,6 +1491,29 @@ input[type="search"]:-webkit-autofill {
 .auth-password-field input::placeholder {
     color: #70809a;
     opacity: 1;
+}
+
+.auth-setup-code-field input {
+    padding-right: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.auth-field-hint,
+.auth-password-hint {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.auth-field-hint {
+    padding: 0 3px;
+}
+
+.auth-password-hint {
+    margin-top: -2px;
+    padding: 0 3px;
 }
 
 .auth-password-field input:-webkit-autofill,
@@ -1550,7 +1605,6 @@ input[type="search"]:-webkit-autofill {
 
 .auth-setup-message,
 .auth-transport-warning {
-    margin-top: 16px;
     padding: 10px 12px;
     border-radius: var(--radius-sm);
     font-size: 12px;
@@ -1558,12 +1612,22 @@ input[type="search"]:-webkit-autofill {
 }
 
 .auth-setup-message {
-    color: #fcd34d;
-    border: 1px solid rgba(245, 158, 11, 0.28);
-    background: rgba(245, 158, 11, 0.10);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: 0 0 16px;
+    color: #bfdbfe;
+    border: 1px solid rgba(59, 130, 246, 0.30);
+    background: rgba(59, 130, 246, 0.10);
+}
+
+.auth-setup-message strong {
+    color: #dbeafe;
+    font-size: 12px;
 }
 
 .auth-transport-warning {
+    margin-top: 16px;
     color: #fdba74;
     border: 1px solid rgba(249, 115, 22, 0.24);
     background: rgba(249, 115, 22, 0.08);
@@ -1667,6 +1731,7 @@ input[type="search"]:-webkit-autofill {
     .content-toolbar { flex-direction: column; align-items: stretch; }
     .toolbar-right { justify-content: flex-start; flex-wrap: wrap; }
     .auth-card { padding: 26px 20px; }
+    .auth-card.setup-mode { padding: 24px 20px; }
     .header-actions { flex-wrap: wrap; }
     .secure-url-row { flex-direction: column; }
 }

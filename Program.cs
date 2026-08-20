@@ -116,10 +116,12 @@ if (!Directory.Exists(Globals.HLS_FULL_PATH))
 app.MapGet("/api/auth/session", (HttpContext context) =>
 {
     bool authenticated = adminAuth.IsAuthenticated(context.Request);
+    bool setupRequired = !adminAuth.IsPasswordConfigured;
     return Results.Json(new
     {
         authenticated,
-        setupRequired = !adminAuth.IsPasswordConfigured,
+        setupRequired,
+        setupCodeRequired = setupRequired && !AdminAuthService.CanSetupWithoutCode(context),
         sessionLifetimeSeconds = (int)AdminAuthService.SessionLifetime.TotalSeconds,
         secureTransport = context.Request.IsHttps
     });
@@ -159,29 +161,62 @@ app.MapPost("/api/auth/logout", (HttpContext context) =>
     return Results.Ok(new { success = true });
 });
 
-// 首次安装兜底：只能从容器/主机回环地址初始化，避免局域网抢占管理员密码。
+// 首次安装引导：本机直连可直接设置；Docker/NAS/反代访问需提供启动日志中的一次性验证码。
 app.MapPost("/api/auth/setup", async (HttpContext context) =>
 {
     if (adminAuth.IsPasswordConfigured)
         return Results.Conflict(new { error = "管理员密码已经初始化" });
-    if (!AdminAuthService.IsLoopbackRequest(context))
-        return Results.Json(new { error = "首次密码只能从服务器本机回环地址初始化" }, statusCode: StatusCodes.Status403Forbidden);
+    if (context.Request.Headers["X-LSG-Request"] != "1")
+        return Results.BadRequest(new { error = "缺少首次设置请求校验头" });
 
     if (context.Request.ContentLength is > 2048)
         return Results.BadRequest(new { error = "密码请求体过大" });
 
-    string password;
+    var setupRequest = new AuthSetupRequest();
     if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) == true)
     {
-        AuthSetupRequest? request = await context.Request.ReadFromJsonAsync<AuthSetupRequest>();
-        password = request?.Password ?? "";
+        try
+        {
+            setupRequest = await context.Request.ReadFromJsonAsync<AuthSetupRequest>() ?? new AuthSetupRequest();
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest(new { error = "首次设置请求格式无效" });
+        }
+        catch (BadHttpRequestException)
+        {
+            return Results.BadRequest(new { error = "首次设置请求格式无效" });
+        }
     }
     else
     {
         using var reader = new StreamReader(context.Request.Body, Encoding.UTF8, leaveOpen: true);
-        password = (await reader.ReadToEndAsync()).TrimEnd('\r', '\n');
+        setupRequest.Password = (await reader.ReadToEndAsync()).TrimEnd('\r', '\n');
     }
 
+    if (!AdminAuthService.CanSetupWithoutCode(context))
+    {
+        string clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        bool validCode = adminAuth.TryValidateSetupCode(setupRequest.SetupCode, clientKey, out bool rateLimited, out TimeSpan retryAfter);
+        if (!validCode)
+        {
+            if (rateLimited)
+            {
+                int seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+                context.Response.Headers["Retry-After"] = seconds.ToString();
+                Console.WriteLine($"[Security] 首次设置验证码触发限速，来源={clientKey}，等待={seconds}s");
+                return Results.Json(
+                    new { error = $"初始化码尝试过于频繁，请在 {seconds} 秒后重试", retryAfterSeconds = seconds },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+
+            return Results.Json(
+                new { error = "一次性初始化码无效，请查看本次启动的最新服务日志" },
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+    }
+
+    string password = setupRequest.Password;
     string? passwordError = AdminAuthService.ValidateNewPassword(password);
     if (passwordError != null)
         return Results.BadRequest(new { error = passwordError });
@@ -207,10 +242,11 @@ app.MapPost("/api/auth/setup", async (HttpContext context) =>
         return Results.Json(new { error = "密码配置写入失败" }, statusCode: StatusCodes.Status500InternalServerError);
     }
 
+    adminAuth.CompleteInitialSetup();
     adminAuth.InvalidateAllSessions();
     string token = adminAuth.CreateSession(password);
     AdminAuthService.AppendSessionCookie(context.Response, token, context.Request.IsHttps);
-    Console.WriteLine("[Security] 管理员密码与独立播放令牌已通过本机初始化");
+    Console.WriteLine("[Security] 管理员密码与独立播放令牌已通过首次设置引导创建，一次性初始化码已作废");
     return Results.Ok(new
     {
         success = true,
@@ -1692,7 +1728,7 @@ public class ChannelMetrics
 
 public static class Globals
 {
-    public const string APP_VERSION = "v1.5.5";
+    public const string APP_VERSION = "v1.5.6";
     public const int HTTP_PORT = 9898;
     public const string HLS_DIR = "hls_stream";
     public const int HLS_MANIFEST_FRESH_SECONDS = 30;

@@ -18,12 +18,24 @@ public sealed class AdminAuthService
     private const int PasswordHashIterations = 310_000;
     private const int PasswordSaltBytes = 16;
     private const int PasswordHashBytes = 32;
+    private const int SetupCodeGroups = 4;
+    private const int SetupCodeGroupLength = 4;
+    private const string SetupCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     private const int MaxFailedAttempts = 5;
     private static readonly TimeSpan AttemptWindow = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(10);
 
     private readonly ConcurrentDictionary<string, AdminSession> _sessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, LoginAttemptState> _loginAttempts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, LoginAttemptState> _setupAttempts = new(StringComparer.Ordinal);
+    private readonly object _setupCodeLock = new();
+    private byte[]? _setupCodeHash;
+
+    public AdminAuthService()
+    {
+        if (!IsPasswordConfigured)
+            InitializeSetupCode();
+    }
 
     public bool IsPasswordConfigured
     {
@@ -56,6 +68,77 @@ public sealed class AdminAuthService
         if (password.Length > 256)
             return "密码不能超过 256 个字符";
         return null;
+    }
+
+    public bool TryValidateSetupCode(
+        string? setupCode,
+        string clientKey,
+        out bool rateLimited,
+        out TimeSpan retryAfter)
+    {
+        rateLimited = false;
+        retryAfter = TimeSpan.Zero;
+
+        var state = _setupAttempts.GetOrAdd(clientKey, _ => new LoginAttemptState());
+        DateTime now = DateTime.UtcNow;
+
+        lock (state.SyncRoot)
+        {
+            if (state.BlockedUntilUtc > now)
+            {
+                rateLimited = true;
+                retryAfter = state.BlockedUntilUtc - now;
+                return false;
+            }
+
+            state.Failures.RemoveAll(at => now - at > AttemptWindow);
+        }
+
+        string normalized = NormalizeSetupCode(setupCode);
+        byte[] actualHash = SHA256.HashData(Encoding.ASCII.GetBytes(normalized));
+        bool valid;
+        lock (_setupCodeLock)
+        {
+            valid = _setupCodeHash != null &&
+                    _setupCodeHash.Length == actualHash.Length &&
+                    CryptographicOperations.FixedTimeEquals(actualHash, _setupCodeHash);
+        }
+        CryptographicOperations.ZeroMemory(actualHash);
+
+        lock (state.SyncRoot)
+        {
+            if (valid)
+            {
+                state.Failures.Clear();
+                state.BlockedUntilUtc = DateTime.MinValue;
+                _setupAttempts.TryRemove(clientKey, out _);
+                return true;
+            }
+
+            state.Failures.Add(now);
+            if (state.Failures.Count >= MaxFailedAttempts)
+            {
+                state.Failures.Clear();
+                state.BlockedUntilUtc = now.Add(LockoutDuration);
+                rateLimited = true;
+                retryAfter = LockoutDuration;
+            }
+        }
+
+        return false;
+    }
+
+    public void CompleteInitialSetup()
+    {
+        lock (_setupCodeLock)
+        {
+            if (_setupCodeHash != null)
+            {
+                CryptographicOperations.ZeroMemory(_setupCodeHash);
+                _setupCodeHash = null;
+            }
+        }
+        _setupAttempts.Clear();
     }
 
     public bool TryValidateCredentials(
@@ -238,6 +321,61 @@ public sealed class AdminAuthService
         return IPAddress.IsLoopback(address);
     }
 
+    public static bool CanSetupWithoutCode(HttpContext context)
+    {
+        if (!IsLoopbackRequest(context)) return false;
+        if (context.Request.Headers.ContainsKey("Forwarded") ||
+            context.Request.Headers.ContainsKey("X-Forwarded-For") ||
+            context.Request.Headers.ContainsKey("X-Real-IP"))
+            return false;
+
+        string host = context.Request.Host.Host;
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+        if (!IPAddress.TryParse(host, out IPAddress? hostAddress)) return false;
+        if (hostAddress.IsIPv4MappedToIPv6) hostAddress = hostAddress.MapToIPv4();
+        return IPAddress.IsLoopback(hostAddress);
+    }
+
+    private void InitializeSetupCode()
+    {
+        string setupCode = CreateSetupCode();
+        byte[] setupCodeHash = SHA256.HashData(Encoding.ASCII.GetBytes(NormalizeSetupCode(setupCode)));
+        lock (_setupCodeLock)
+            _setupCodeHash = setupCodeHash;
+
+        Console.WriteLine("[Security] ============================================================");
+        Console.WriteLine($"[Security] 首次设置验证码: {setupCode}");
+        Console.WriteLine("[Security] 管理员密码尚未设置，请打开 Web 面板按引导创建密码。");
+        Console.WriteLine("[Security] 验证码仅在本次启动且尚未完成设置时有效，请勿公开。");
+        Console.WriteLine("[Security] ============================================================");
+    }
+
+    private static string CreateSetupCode()
+    {
+        var groups = new string[SetupCodeGroups];
+        for (int groupIndex = 0; groupIndex < SetupCodeGroups; groupIndex++)
+        {
+            var chars = new char[SetupCodeGroupLength];
+            for (int charIndex = 0; charIndex < SetupCodeGroupLength; charIndex++)
+                chars[charIndex] = SetupCodeAlphabet[RandomNumberGenerator.GetInt32(SetupCodeAlphabet.Length)];
+            groups[groupIndex] = new string(chars);
+        }
+        return string.Join('-', groups);
+    }
+
+    private static string NormalizeSetupCode(string? setupCode)
+    {
+        if (string.IsNullOrWhiteSpace(setupCode) || setupCode.Length > 64) return "";
+
+        var normalized = new StringBuilder(setupCode.Length);
+        foreach (char character in setupCode)
+        {
+            if (char.IsAsciiLetterOrDigit(character))
+                normalized.Append(char.ToUpperInvariant(character));
+        }
+        return normalized.ToString();
+    }
+
     private void CleanupExpiredSessions()
     {
         DateTime now = DateTime.UtcNow;
@@ -272,6 +410,7 @@ public sealed class AuthLoginRequest
 public sealed class AuthSetupRequest
 {
     public string Password { get; set; } = "";
+    public string SetupCode { get; set; } = "";
 }
 
 public sealed class AuthPasswordChangeRequest
