@@ -1,3 +1,39 @@
+## 🚀 v1.5.5 更新说明 (Release Notes)
+
+### ⚙️ 发布流水线全面升级至 Node.js 24
+
+本版本是一次发布基础设施维护升级，将 Windows Release 与多架构 Docker 镜像流水线使用的 GitHub Actions 全面迁移至 Node.js 24 兼容版本，消除 Node.js 20 生命周期结束警告，同时保持应用运行逻辑和现有发布产物不变。
+
+#### 核心变更
+
+1. **🟢 升级 GitHub 官方基础 Action**
+   - `actions/checkout` 从 `v4` 升级至 `v7`，Windows 与 Docker 两个任务统一使用 Node.js 24 运行时；
+   - `actions/setup-dotnet` 从 `v4` 升级至 `v6`，继续安装和构建 .NET 10；
+   - `softprops/action-gh-release` 从 `v2` 升级至 `v3`，保留现有 Release 标题、emoji 更新说明和资产上传方式。
+
+2. **🐳 升级 Docker 多架构发布链路**
+   - `docker/setup-qemu-action` 与 `docker/setup-buildx-action` 统一升级至 `v4`；
+   - `docker/login-action` 升级至 `v4`，继续使用 GitHub Actions 临时令牌登录 GHCR；
+   - `docker/metadata-action` 升级至 `v6`，保留语义化版本号与 `latest` 标签；
+   - `docker/build-push-action` 升级至 `v7`，继续同时发布 `linux/amd64` 和 `linux/arm64` 镜像。
+
+3. **🛡️ 移除 Node.js 20 兼容债务**
+   - 所有目标 Action 的官方 `action.yml` 均已确认声明 `runs.using: node24`；
+   - 不使用临时且不安全的 `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` 兼容开关；
+   - 避免 GitHub Runner 在移除 Node.js 20 后导致后续版本无法自动发布。
+
+4. **📦 保持发布产物与触发规则不变**
+   - 继续由 `v*` Tag 自动触发 Windows x64 自包含单文件打包、FFmpeg 集成和 GitHub Release 创建；
+   - Windows ZIP 仍由 GitHub Actions 云端生成，本地不额外制作或上传压缩包；
+   - GHCR 的版本标签与 `latest` 仍指向同一多架构 OCI 镜像索引。
+
+5. **✅ 保持应用行为完全兼容**
+   - 本次不修改管理端登录、播放令牌、M3U/HLS 地址、频道配置或 FFmpeg 推流逻辑；
+   - 现有配置文件、Jellyfin / IPTV 订阅地址及独立播放登录态不受影响；
+   - 已核对新 Action 的全部现用输入参数，并通过 Release 构建、实际 Actions 发布与 GHCR 平台验收。
+
+---
+
 ## 🚀 v1.5.4 更新说明 (Release Notes)
 
 ### 🎨 管理端输入控件与登录体验优化
