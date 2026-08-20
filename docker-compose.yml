@@ -26,7 +26,7 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
-    # 容器健康检查：每 30s 检查 /api/health，连续 3 次失败触发重启
+    # 容器健康检查：每 30s 检查 /api/health；失败会标记 unhealthy，便于面板/监控告警
     healthcheck:
       test: ["CMD", "curl", "-f", "-s", "http://localhost:9898/api/health"]
       interval: 30s

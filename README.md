@@ -31,7 +31,7 @@
 ### 1. 🛡️ 虎牙防盗链与短效签名过期 (403 Forbidden)
 - **痛点**：虎牙 CDN 直播流的 HLS/FLV 签名（`wsSecret` 与 `wsTime`）通常只有约 110 秒有效期。常规播放器直接播放时，在分片刷新或重连时因签名过期必报 `403 Forbidden`。
 - **解决方案**：
-  - 内置**动态透明反向代理端点** (`/huya-source/{channelId}/stream.m3u8`)。
+  - 内置仅限容器回环访问的**动态透明反向代理端点** (`/huya-source/{channelId}/stream.m3u8`)。
   - **扁平化 Master Playlist (Master Playlist Flattening)**：自动解析多码率主索引，直接提取并重签底层包含实际 TS 分片的 Media Playlist，杜绝播放器/FFmpeg 绕过代理。
   - 动态重签机制按标准 URI 规则重新解析 Master/Media Playlist，并用 1.5s 防抖缓存减少重复请求；过期列表仅允许 6 秒短暂容错，避免反复播放旧片段。
 
@@ -55,7 +55,7 @@
 - 大盘卡片极简状态联动，过期失效时自动以 **🔴 已过期** 红色醒目预警。
 
 ### 6. 📺 完美的 IPTV / Jellyfin 协议适配与守护自愈
-- 提供标准的 IPTV M3U 播放列表端点 (`http://<ip>:9898/jellyfin.m3u`)；
+- 提供带独立 256 位播放令牌的 IPTV M3U 端点 (`http://<ip>:9898/p/<token>/jellyfin.m3u`)；
 - 支持独立频道使能开关，未启用频道自动停止推流并从 M3U 列表中过滤；
 - 内置后台健康巡检，监控 HLS 切片文件的时间戳，遇到卡流或断流自动平滑重启。
 
@@ -87,8 +87,8 @@
              │          ▼
              └─► [Kestrel HTTP 服务 (默认端口 9898)]
                         │
-                        ├─► /jellyfin.m3u (标准 IPTV M3U 电视索引)
-                        └─► /live/{channelId}/stream.m3u8 (HLS 播放流)
+                        ├─► /p/{token}/jellyfin.m3u (受保护的 IPTV M3U 电视索引)
+                        └─► /p/{token}/live/{channelId}/stream.m3u8 (受保护的 HLS 播放流)
                                 │
                                 ▼
        [极米 H1 / Android 电视盒子 / Apple TV / PC]
@@ -110,6 +110,26 @@
 - 🍪 **平台 Cookie 折叠管理**：固定支持三大平台，支持折叠编辑、一键真伪鉴权检测与定时自动巡检；
 - ▶️ **内置 HLS 试播播放器**：点击频道卡片上的【试播】按钮，直接在浏览器内实时弹窗播放直播流进行快速验证；
 - 📋 **一键复制 M3U 订阅源**：一键复制 Jellyfin / IPTV 调谐器链接。
+- 🔐 **管理员登录保护**：频道、Cookie、主机地址、指标等所有管理 API 均需要登录；密码仅保存 PBKDF2 加盐哈希，支持退出登录和在线修改密码；
+- 🔑 **独立播放访问令牌**：Jellyfin 使用不可猜测的 256 位令牌，不依赖网页登录状态；管理端可复制或轮换订阅地址；
+- 🕶️ **Cookie 原文不回传**：浏览器只接收平台 Cookie 的配置状态，旧 Cookie 不会通过 API 回显。
+
+### 🔐 首次初始化管理员密码
+
+首次启动时 `AdminPasswordHash` 为空，管理 API 默认锁定。Docker 用户可在宿主机执行以下命令，通过容器回环地址安全初始化密码（输入内容不会出现在命令行参数中）：
+
+```bash
+read -rsp "请输入新的管理员密码（至少 12 个字符）: " ADMIN_PASSWORD; echo
+printf '%s' "$ADMIN_PASSWORD" | docker exec -i live-stream-gateway \
+  curl -fsS -X POST -H 'Content-Type: text/plain' --data-binary @- \
+  http://127.0.0.1:9898/api/auth/setup
+unset ADMIN_PASSWORD
+```
+
+初始化响应会返回一次受保护的 `m3uPath`，随后也可登录管理端通过“🔑 播放令牌”再次复制完整地址。管理员密码以 `PBKDF2-SHA256` 哈希写入 `config.json`；播放令牌只保存 SHA-256 摘要及 AES-256-GCM 密文。不要把 SSH、系统 root 密码或平台 Cookie 复用为管理密码。
+
+> [!IMPORTANT]
+> Jellyfin/IPTV 的 `/p/{token}/*` 播放端点不要求网页登录，因此管理会话过期不会导致断流；但从旧版本首次升级到本安全版本后，必须把 Jellyfin 中可猜测的旧地址更新为管理端显示的新地址。纯 HTTP 无法防止令牌被同网段窃听，跨越不可信网络时请配置 HTTPS 反向代理。
 
 ---
 
@@ -165,6 +185,8 @@ curl -sSL https://raw.githubusercontent.com/Yafeiml/LiveStreamGateway/main/confi
 
 # 2. 启动容器
 docker compose up -d
+
+# 3. 按上文“首次初始化管理员密码”完成一次密码设置
 ```
 
 #### 🔄 Docker 一键升级
@@ -187,7 +209,7 @@ docker run -d \
   ghcr.io/yafeiml/livestreamgateway:latest
 ```
 
-启动完成后，直接访问 `http://<NAS的IP>:9898` 即可通过 Web 界面可视化管理！
+启动并初始化管理员密码后，访问 `http://<NAS的IP>:9898` 登录 Web 管理界面。
 
 > [!WARNING]
 > ### ⚠️ Windows Docker Desktop / WSL2 部署警告
@@ -233,31 +255,34 @@ dotnet run
 3. 点击 **添加**，类型选择 **M3U 播放列表 (M3U Tuner)**。
 4. **文件或 URL** 填写：
    ```text
-   http://<运行主机的局域网IP>:9898/jellyfin.m3u
+   http://<运行主机的局域网IP>:9898/p/<播放令牌>/jellyfin.m3u
    ```
 5. 保存后，在电视端（如极米 H1 上的 Jellyfin 客户端）打开 **“直播电视” (Live TV)**，即可看到所有频道并流畅播放！
 
 #### 方式 B：接入通用 IPTV 播放器 (TiviMate / APTV / PotPlayer / VLC)
 - 直接在播放器中添加订阅源 URL：
   ```text
-  http://<运行主机的局域网IP>:9898/jellyfin.m3u
+  http://<运行主机的局域网IP>:9898/p/<播放令牌>/jellyfin.m3u
   ```
 - 或单独播放单个频道：
   ```text
-  http://<运行主机的局域网IP>:9898/live/<频道Id>/stream.m3u8
+  http://<运行主机的局域网IP>:9898/p/<播放令牌>/live/<频道Id>/stream.m3u8
   ```
 
 ---
 
 ## ⚙️ 配置文件详细说明 (`config.json`)
 
-配置文件包含 **全局推流与网络参数**、**CookieProfiles（凭据池）** 与 **Channels（频道列表）**。
+配置文件包含 **管理密码哈希**、**播放令牌摘要/密文**、**全局推流与网络参数**、**CookieProfiles（凭据池）** 与 **Channels（频道列表）**。`AdminPasswordHash`、`PlaybackTokenHash`、`PlaybackTokenEncrypted` 均由初始化或轮换接口自动写入，请勿手工填写明文。
 
 ### 完整配置示例
 
 ```json
 {
   "CustomHost": "",
+  "AdminPasswordHash": "",
+  "PlaybackTokenHash": "",
+  "PlaybackTokenEncrypted": "",
   "StreamingMode": "AlwaysOn",
   "IdleTimeoutSeconds": 300,
   "StartupTimeoutSeconds": 30,

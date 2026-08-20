@@ -4,12 +4,39 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LiveStreamGateway - 全平台直播流聚合中继网关</title>
-    <link rel="stylesheet" href="css/style.css?v=1.5.2">
+    <link rel="stylesheet" href="css/style.css?v=1.5.3">
     <!-- Hls.js for live preview player -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
 </head>
 <body>
-    <div class="app-container">
+    <!-- 管理端登录门禁：静态壳可公开加载，但所有数据与操作均由后端会话鉴权。 -->
+    <div class="auth-gate" id="auth-gate">
+        <div class="auth-card">
+            <div class="auth-brand-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="4" y="10" width="16" height="11" rx="2"></rect>
+                    <path d="M8 10V7a4 4 0 0 1 8 0v3"></path>
+                    <circle cx="12" cy="15" r="1"></circle>
+                </svg>
+            </div>
+            <h1>LiveStreamGateway</h1>
+            <p class="auth-subtitle">登录管理控制台</p>
+            <form id="form-login" class="auth-form">
+                <label for="login-password">管理员密码</label>
+                <input type="password" id="login-password" autocomplete="current-password" maxlength="256" required autofocus placeholder="请输入管理员密码">
+                <div class="auth-error" id="login-error" role="alert"></div>
+                <button type="submit" class="btn btn-primary auth-submit" id="btn-login">登录</button>
+            </form>
+            <div class="auth-setup-message" id="auth-setup-message" hidden>
+                管理员密码尚未初始化。请在服务器本机通过 <code>/api/auth/setup</code> 完成首次设置。
+            </div>
+            <div class="auth-transport-warning" id="auth-transport-warning" hidden>
+                ⚠️ 当前使用 HTTP，请仅在可信局域网中登录；跨不可信网络请配置 HTTPS 反向代理。
+            </div>
+        </div>
+    </div>
+
+    <div class="app-container" id="app-shell" inert>
         <!-- Top Navigation -->
         <header class="app-header">
             <div class="header-brand">
@@ -22,7 +49,7 @@
                 <div class="brand-text">
                     <h1>
                         <a href="https://github.com/Yafeiml/LiveStreamGateway" target="_blank" rel="noopener noreferrer" class="brand-title-link" title="前往 GitHub 项目主页">LiveStreamGateway</a>
-                        <span class="version-tag" id="app-version">v1.5.2</span>
+                        <span class="version-tag" id="app-version">v1.5.3</span>
                     </h1>
                     <span class="sub-title">多平台直播中继与 IPTV 转换服务</span>
                 </div>
@@ -40,6 +67,9 @@
                     </svg>
                     <span>复制 M3U 地址</span>
                 </button>
+                <button class="btn btn-secondary" id="btn-playback-security" title="查看或轮换独立播放访问令牌">🔑 播放令牌</button>
+                <button class="btn btn-secondary" id="btn-change-password" title="修改管理端登录密码">🔐 修改密码</button>
+                <button class="btn btn-secondary" id="btn-logout" title="退出管理控制台">退出登录</button>
             </div>
         </header>
 
@@ -338,7 +368,7 @@
             </div>
             <div class="player-info-bar">
                 <span class="player-url-label">HLS 播放地址：</span>
-                <code id="preview-hls-url">/live/.../stream.m3u8</code>
+                <code id="preview-hls-url">/p/&lt;token&gt;/live/.../stream.m3u8</code>
                 <button class="btn btn-sm btn-secondary" id="btn-copy-stream-url">复制链接</button>
             </div>
         </div>
@@ -369,6 +399,75 @@
     </div>
 
     <!-- Modal: Unified Custom Confirm Dialog -->
+    <div class="modal-backdrop" id="modal-playback-security">
+        <div class="modal-card modal-large">
+            <div class="modal-header">
+                <h3>🔑 Jellyfin / IPTV 播放令牌</h3>
+                <button class="modal-close" onclick="closeModal('modal-playback-security')">&times;</button>
+            </div>
+            <div class="modal-body playback-security-body">
+                <p class="section-desc">
+                    播放令牌独立于网页登录会话，Jellyfin 不会因管理员退出或登录过期而断开。令牌具有 256 位随机熵，服务端仅保存摘要和管理员密码加密后的恢复密文。
+                </p>
+                <div class="playback-token-status" id="playback-token-status">正在读取令牌状态...</div>
+                <div class="form-group">
+                    <label for="playback-m3u-url">当前受保护的 M3U 订阅地址</label>
+                    <div class="secure-url-row">
+                        <input type="text" id="playback-m3u-url" readonly placeholder="尚未生成播放令牌">
+                        <button type="button" class="btn btn-secondary" id="btn-copy-secure-m3u">复制地址</button>
+                    </div>
+                </div>
+                <form id="form-rotate-playback-token" class="token-rotation-form">
+                    <div class="form-group">
+                        <label for="playback-token-current-password">输入管理员密码以轮换令牌</label>
+                        <input type="password" id="playback-token-current-password" autocomplete="current-password" maxlength="256" required placeholder="当前管理员密码">
+                    </div>
+                    <div class="auth-error" id="playback-token-error" role="alert"></div>
+                    <div class="token-warning">
+                        ⚠️ 轮换后旧 M3U、HLS 和分片地址立即失效，必须把新地址同步更新到 Jellyfin / IPTV 客户端。
+                    </div>
+                    <div class="editor-actions">
+                        <button type="submit" class="btn btn-danger" id="btn-rotate-playback-token">轮换并作废旧地址</button>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" onclick="closeModal('modal-playback-security')">完成</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="modal-password">
+        <div class="modal-card modal-password-card">
+            <div class="modal-header">
+                <h3>🔐 修改管理员密码</h3>
+                <button class="modal-close" onclick="closeModal('modal-password')">&times;</button>
+            </div>
+            <form id="form-change-password">
+                <div class="modal-body password-form-body">
+                    <div class="form-group">
+                        <label for="current-admin-password">当前密码</label>
+                        <input type="password" id="current-admin-password" autocomplete="current-password" maxlength="256" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-admin-password">新密码 <span class="tip">（至少 12 个字符）</span></label>
+                        <input type="password" id="new-admin-password" autocomplete="new-password" minlength="12" maxlength="256" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="confirm-admin-password">确认新密码</label>
+                        <input type="password" id="confirm-admin-password" autocomplete="new-password" minlength="12" maxlength="256" required>
+                    </div>
+                    <div class="auth-error" id="password-change-error" role="alert"></div>
+                    <p class="password-session-note">修改成功后，其它浏览器中的旧会话会立即失效。</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('modal-password')">取消</button>
+                    <button type="submit" class="btn btn-primary" id="btn-save-password">保存新密码</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <div class="modal-backdrop" id="modal-confirm">
         <div class="modal-card modal-confirm-card">
             <div class="confirm-icon-box danger" id="confirm-icon-box">
@@ -392,6 +491,6 @@
     <!-- Toast Notification -->
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="js/app.js?v=1.5.2"></script>
+    <script src="js/app.js?v=1.5.3"></script>
 </body>
 </html>

@@ -18,7 +18,10 @@ let appState = {
     previewLastProgressAt: 0,
     previewLastTime: 0,
     pollTimer: null,
-    urlDebounceTimer: null
+    urlDebounceTimer: null,
+    authenticated: false,
+    managementStarted: false,
+    handlingUnauthorized: false
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -27,14 +30,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function initApp() {
     setupEventListeners();
-    await loadConfig();
-    await loadStatus();
-    
-    // Auto refresh status every 3 seconds
-    appState.pollTimer = setInterval(loadStatus, 3000);
+    await initializeAuthentication();
 }
 
 function setupEventListeners() {
+    document.getElementById('form-login')?.addEventListener('submit', loginAdmin);
+    document.getElementById('btn-logout')?.addEventListener('click', logoutAdmin);
+    document.getElementById('btn-playback-security')?.addEventListener('click', openPlaybackSecurityModal);
+    document.getElementById('btn-copy-secure-m3u')?.addEventListener('click', () => {
+        const url = document.getElementById('playback-m3u-url')?.value || '';
+        if (url) copyTextToClipboard(url, '受保护的 M3U 地址', document.getElementById('btn-copy-secure-m3u'));
+    });
+    document.getElementById('form-rotate-playback-token')?.addEventListener('submit', rotatePlaybackToken);
+    document.getElementById('btn-change-password')?.addEventListener('click', () => {
+        document.getElementById('form-change-password')?.reset();
+        const error = document.getElementById('password-change-error');
+        if (error) error.innerText = '';
+        openModal('modal-password');
+        setTimeout(() => document.getElementById('current-admin-password')?.focus(), 50);
+    });
+    document.getElementById('form-change-password')?.addEventListener('submit', changeAdminPassword);
+
     // Copy M3U Button
     document.getElementById('btn-copy-m3u')?.addEventListener('click', copyM3uUrl);
     
@@ -69,12 +85,275 @@ function setupEventListeners() {
 }
 
 // -------------------------------------------------------------
+// Management Authentication
+// -------------------------------------------------------------
+
+async function initializeAuthentication() {
+    const loginError = document.getElementById('login-error');
+    try {
+        const res = await window.fetch('/api/auth/session', {
+            credentials: 'same-origin',
+            cache: 'no-store'
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const session = await res.json();
+        const setupMessage = document.getElementById('auth-setup-message');
+        const transportWarning = document.getElementById('auth-transport-warning');
+        if (setupMessage) setupMessage.hidden = !session.setupRequired;
+        if (transportWarning) transportWarning.hidden = session.secureTransport === true;
+
+        if (session.authenticated) {
+            unlockManagement();
+            await startManagementApp();
+            return;
+        }
+
+        lockManagement(session.setupRequired ? '管理员密码尚未初始化' : '');
+    } catch (err) {
+        if (loginError) loginError.innerText = `无法连接管理服务：${err.message}`;
+        lockManagement();
+    }
+}
+
+async function startManagementApp() {
+    appState.authenticated = true;
+    await Promise.all([loadConfig(), loadStatus()]);
+
+    if (appState.pollTimer) window.clearInterval(appState.pollTimer);
+    appState.pollTimer = window.setInterval(loadStatus, 3000);
+    appState.managementStarted = true;
+}
+
+function unlockManagement() {
+    appState.authenticated = true;
+    appState.handlingUnauthorized = false;
+    document.getElementById('auth-gate')?.classList.add('authenticated');
+    document.getElementById('app-shell')?.removeAttribute('inert');
+    const loginError = document.getElementById('login-error');
+    if (loginError) loginError.innerText = '';
+}
+
+function lockManagement(message = '') {
+    appState.authenticated = false;
+    appState.managementStarted = false;
+    if (appState.pollTimer) window.clearInterval(appState.pollTimer);
+    appState.pollTimer = null;
+    appState.previewToken++;
+    resetPreviewPlayback();
+
+    document.querySelectorAll('.modal-backdrop.active').forEach(modal => modal.classList.remove('active'));
+    document.getElementById('auth-gate')?.classList.remove('authenticated');
+    document.getElementById('app-shell')?.setAttribute('inert', '');
+    const loginError = document.getElementById('login-error');
+    if (loginError) loginError.innerText = message;
+    const password = document.getElementById('login-password');
+    if (password) password.value = '';
+    window.setTimeout(() => password?.focus(), 50);
+}
+
+async function apiFetch(input, options = {}) {
+    const headers = new Headers(options.headers || {});
+    const method = String(options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method))
+        headers.set('X-LSG-Request', '1');
+
+    const res = await window.fetch(input, {
+        ...options,
+        method,
+        headers,
+        credentials: 'same-origin',
+        cache: options.cache || 'no-store'
+    });
+
+    if (res.status === 401 && !appState.handlingUnauthorized) {
+        appState.handlingUnauthorized = true;
+        lockManagement('登录会话已过期，请重新登录');
+    }
+    return res;
+}
+
+async function loginAdmin(event) {
+    event.preventDefault();
+    const passwordInput = document.getElementById('login-password');
+    const button = document.getElementById('btn-login');
+    const error = document.getElementById('login-error');
+    const password = passwordInput?.value || '';
+
+    if (button) {
+        button.disabled = true;
+        button.innerText = '登录中...';
+    }
+    if (error) error.innerText = '';
+
+    try {
+        const res = await window.fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            body: JSON.stringify({ password })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (error) error.innerText = data.error || '登录失败';
+            return;
+        }
+
+        if (passwordInput) passwordInput.value = '';
+        unlockManagement();
+        await startManagementApp();
+    } catch (err) {
+        if (error) error.innerText = `登录请求失败：${err.message}`;
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.innerText = '登录';
+        }
+    }
+}
+
+async function logoutAdmin() {
+    try {
+        await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch (_) { }
+    lockManagement('已安全退出');
+}
+
+async function changeAdminPassword(event) {
+    event.preventDefault();
+    const currentPassword = document.getElementById('current-admin-password')?.value || '';
+    const newPassword = document.getElementById('new-admin-password')?.value || '';
+    const confirmedPassword = document.getElementById('confirm-admin-password')?.value || '';
+    const error = document.getElementById('password-change-error');
+    const button = document.getElementById('btn-save-password');
+
+    if (error) error.innerText = '';
+    if (newPassword !== confirmedPassword) {
+        if (error) error.innerText = '两次输入的新密码不一致';
+        return;
+    }
+    if (newPassword.length < 12) {
+        if (error) error.innerText = '新密码至少需要 12 个字符';
+        return;
+    }
+
+    if (button) {
+        button.disabled = true;
+        button.innerText = '保存中...';
+    }
+
+    try {
+        const res = await apiFetch('/api/auth/change-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ currentPassword, newPassword })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (error && appState.authenticated) error.innerText = data.error || '密码修改失败';
+            return;
+        }
+
+        document.getElementById('form-change-password')?.reset();
+        closeModal('modal-password');
+        showToast('管理员密码已修改，其它旧会话已失效', 'success');
+    } catch (err) {
+        if (error) error.innerText = `请求失败：${err.message}`;
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.innerText = '保存新密码';
+        }
+    }
+}
+
+function openPlaybackSecurityModal() {
+    renderPlaybackSecurityState();
+    const error = document.getElementById('playback-token-error');
+    const password = document.getElementById('playback-token-current-password');
+    if (error) error.innerText = '';
+    if (password) password.value = '';
+    openModal('modal-playback-security');
+}
+
+function renderPlaybackSecurityState() {
+    const url = appState.status?.m3uUrl || '';
+    const configured = appState.status?.playbackTokenConfigured === true;
+    const available = appState.status?.playbackTokenAvailable === true && Boolean(url);
+    const input = document.getElementById('playback-m3u-url');
+    const copyButton = document.getElementById('btn-copy-secure-m3u');
+    const status = document.getElementById('playback-token-status');
+
+    if (input) input.value = available ? url : '';
+    if (copyButton) copyButton.disabled = !available;
+    if (status) {
+        status.className = `playback-token-status${available ? '' : ' missing'}`;
+        if (available) {
+            status.innerText = '✅ 独立播放令牌已启用；网页登录退出或过期不会影响此订阅地址。';
+        } else if (configured) {
+            status.innerText = '⚠️ 播放令牌已配置，但当前会话无法解密恢复地址；请轮换令牌。';
+        } else {
+            status.innerText = '⚠️ 尚未配置播放令牌，请先轮换生成一个新地址。';
+        }
+    }
+}
+
+async function rotatePlaybackToken(event) {
+    event.preventDefault();
+    const currentPassword = document.getElementById('playback-token-current-password')?.value || '';
+    const error = document.getElementById('playback-token-error');
+    const button = document.getElementById('btn-rotate-playback-token');
+    if (error) error.innerText = '';
+
+    const confirmed = await showConfirm({
+        title: '轮换独立播放令牌',
+        message: '旧 M3U 与全部 HLS 地址会立即失效。确认已准备好把新地址更新到 Jellyfin / IPTV 客户端吗？',
+        okText: '确认轮换',
+        cancelText: '暂不轮换',
+        type: 'danger'
+    });
+    if (!confirmed) return;
+
+    if (button) {
+        button.disabled = true;
+        button.innerText = '正在生成...';
+    }
+
+    try {
+        const res = await apiFetch('/api/playback-token/rotate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ currentPassword })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (error) error.innerText = data.error || '播放令牌轮换失败';
+            return;
+        }
+
+        if (document.getElementById('playback-token-current-password'))
+            document.getElementById('playback-token-current-password').value = '';
+        await loadStatus(false);
+        renderPlaybackSecurityState();
+        showToast('播放令牌已轮换，请立即更新 Jellyfin / IPTV 订阅地址', 'success');
+    } catch (err) {
+        if (error) error.innerText = `请求失败：${err.message}`;
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.innerText = '轮换并作废旧地址';
+        }
+    }
+}
+
+// -------------------------------------------------------------
 // API Data Fetching
 // -------------------------------------------------------------
 
 async function loadConfig() {
     try {
-        const res = await fetch('/api/config');
+        const res = await apiFetch('/api/config');
         if (res.ok) {
             const data = await res.json();
             appState.config = data;
@@ -90,7 +369,7 @@ async function loadConfig() {
 
 async function loadStatus(showToastOnSuccess = false) {
     try {
-        const res = await fetch('/api/status');
+        const res = await apiFetch('/api/status');
         if (res.ok) {
             const data = await res.json();
             appState.status = data;
@@ -99,6 +378,8 @@ async function loadStatus(showToastOnSuccess = false) {
             }
             renderDashboard();
             updateCookieStatusSummary();
+            if (document.getElementById('modal-playback-security')?.classList.contains('active'))
+                renderPlaybackSecurityState();
             if (showToastOnSuccess) {
                 showToast('状态已刷新', 'success');
             }
@@ -109,7 +390,7 @@ async function loadStatus(showToastOnSuccess = false) {
 }
 
 function updateCookieStatusSummary() {
-    const profiles = appState.config?.cookieProfiles || {};
+    const configured = appState.config?.cookieConfigured || {};
     const statuses = appState.cookieStatuses || {};
     const platforms = ['huya', 'douyu', 'bilibili'];
 
@@ -117,7 +398,7 @@ function updateCookieStatusSummary() {
     let configuredCount = 0;
 
     platforms.forEach(p => {
-        const hasVal = profiles[p] && profiles[p].trim().length > 0;
+        const hasVal = configured[p] === true;
         if (hasVal) {
             configuredCount++;
             if (statuses[p] && statuses[p].isValid === false) {
@@ -230,8 +511,7 @@ function createChannelCardHtml(ch) {
 
     // 平台 Cookie 状态与真伪检测状态展示
     const platformKey = (ch.platform || 'huya').toLowerCase();
-    const cookieVal = appState.config?.cookieProfiles?.[platformKey] || ch.cookies || '';
-    const hasPlatformCookie = cookieVal.trim().length > 0;
+    const hasPlatformCookie = appState.config?.cookieConfigured?.[platformKey] === true || ch.isCookieConfigured === true;
     const cookieStatus = appState.cookieStatuses?.[platformKey] || {
         configured: ch.isCookieConfigured ?? hasPlatformCookie,
         isValid: ch.isCookieValid ?? true,
@@ -255,7 +535,7 @@ function createChannelCardHtml(ch) {
 
     // 试播按钮可用状态 (只有推流中才能试播)
     // 试播纯图标按钮 (与右侧重启/编辑/删除保持一致)
-    const canPreview = ch.isLive;
+    const canPreview = ch.isLive && Boolean(ch.hlsUrl);
     const previewBtnHtml = canPreview
         ? `<button class="btn-icon" onclick="openPreviewModal('${ch.id}', '${escapeHtml(ch.name)}', '${ch.hlsUrl}')" title="试播">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
@@ -393,7 +673,7 @@ function updatePlatformUi(platform, isUserUrlPresent = false) {
         return;
     }
 
-    const hasCookie = appState.config?.cookieProfiles?.[platform]?.trim()?.length > 0;
+    const hasCookie = appState.config?.cookieConfigured?.[platform] === true;
     const pName = getPlatformDisplayName(platform);
 
     if (badge) {
@@ -479,7 +759,7 @@ async function autoFetchChannelInfo(silent = false) {
     }
 
     try {
-        const res = await fetch(`/api/channels/fetch-info?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(rawUrl)}`);
+        const res = await apiFetch(`/api/channels/fetch-info?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(rawUrl)}`);
         if (res.ok) {
             const data = await res.json();
             if (data.cleanUrl && urlInput) {
@@ -574,7 +854,7 @@ async function saveChannel(event) {
     };
 
     try {
-        const res = await fetch('/api/channels', {
+        const res = await apiFetch('/api/channels', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -605,7 +885,7 @@ async function deleteChannel(id, name) {
     if (!confirmed) return;
 
     try {
-        const res = await fetch(`/api/channels/${encodeURIComponent(id)}`, {
+        const res = await apiFetch(`/api/channels/${encodeURIComponent(id)}`, {
             method: 'DELETE'
         });
 
@@ -623,7 +903,7 @@ async function deleteChannel(id, name) {
 
 async function toggleChannel(id) {
     try {
-        const res = await fetch(`/api/channels/${encodeURIComponent(id)}/toggle`, {
+        const res = await apiFetch(`/api/channels/${encodeURIComponent(id)}/toggle`, {
             method: 'POST'
         });
 
@@ -640,7 +920,7 @@ async function toggleChannel(id) {
 
 async function restartChannel(id) {
     try {
-        const res = await fetch(`/api/channels/${encodeURIComponent(id)}/restart`, {
+        const res = await apiFetch(`/api/channels/${encodeURIComponent(id)}/restart`, {
             method: 'POST'
         });
 
@@ -684,12 +964,11 @@ function togglePlatformCookieEdit(platform, forceState = null) {
 }
 
 function renderPlatformCookieCards() {
-    const profiles = appState.config?.cookieProfiles || {};
+    const configured = appState.config?.cookieConfigured || {};
     const statuses = appState.cookieStatuses || {};
     const platforms = ['huya', 'douyu', 'bilibili'];
 
     platforms.forEach(p => {
-        const val = profiles[p] || '';
         const textarea = document.getElementById(`cookie-${p}`);
         const tag = document.getElementById(`${p}-cookie-tag`);
         const card = document.getElementById(`card-cookie-${p}`);
@@ -697,11 +976,14 @@ function renderPlatformCookieCards() {
         const btnVerify = document.getElementById(`btn-verify-${p}`);
         const status = statuses[p];
 
+        const isConfigured = configured[p] === true;
         if (textarea && document.activeElement !== textarea) {
-            textarea.value = val;
+            textarea.value = '';
+            textarea.placeholder = isConfigured
+                ? '已配置且不会回传原文；如需替换，请粘贴新的 Cookie...'
+                : '在此粘贴新的 Cookie...';
         }
 
-        const isConfigured = val && val.trim().length > 0;
         if (card) {
             if (isConfigured) card.classList.add('configured');
             else card.classList.remove('configured');
@@ -721,16 +1003,16 @@ function renderPlatformCookieCards() {
             } else if (status && status.isValid === true) {
                 tag.className = 'cookie-badge-status valid';
                 const userText = status.username ? `已授权: ${status.username}` : (status.message || '已授权有效');
-                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">${escapeHtml(userText)} (${val.trim().length} 字符)</span>`;
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">${escapeHtml(userText)}</span>`;
             } else if (status && status.isNetworkError) {
                 tag.className = 'cookie-badge-status valid';
-                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已配置 (网络波动，保持状态) (${val.trim().length} 字符)</span>`;
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已配置 (网络波动，保持状态)</span>`;
             } else if (status && status.isValid === false) {
                 tag.className = 'cookie-badge-status expired';
-                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已过期: ${escapeHtml(status.message || '账号未登录')} (${val.trim().length} 字符)</span>`;
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已过期: ${escapeHtml(status.message || '账号未登录')}</span>`;
             } else {
                 tag.className = 'cookie-badge-status';
-                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已配置 (${val.trim().length} 字符)</span>`;
+                tag.innerHTML = `<span class="status-dot"></span><span class="status-text">已配置</span>`;
             }
         }
     });
@@ -751,7 +1033,7 @@ async function verifyPlatformCookie(platform) {
     }
 
     try {
-        const res = await fetch(`/api/cookies/verify?platform=${encodeURIComponent(platform)}`, {
+        const res = await apiFetch(`/api/cookies/verify?platform=${encodeURIComponent(platform)}`, {
             method: 'POST'
         });
 
@@ -790,7 +1072,7 @@ async function verifyPlatformCookie(platform) {
 async function verifyAllPlatformCookies() {
     showToast('正在检测全部平台 Cookie 状态...', 'info');
     try {
-        const res = await fetch('/api/cookies/verify?platform=all', {
+        const res = await apiFetch('/api/cookies/verify?platform=all', {
             method: 'POST'
         });
 
@@ -816,8 +1098,14 @@ async function savePlatformCookie(platform) {
     const cookie = textarea?.value?.trim() || '';
     const pName = getPlatformDisplayName(platform);
 
+    if (!cookie) {
+        showToast(`请粘贴新的 ${pName} Cookie；如需删除请使用“清空”按钮`, 'warning');
+        textarea?.focus();
+        return;
+    }
+
     try {
-        const res = await fetch('/api/cookies', {
+        const res = await apiFetch('/api/cookies', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ key: platform, cookie })
@@ -861,7 +1149,7 @@ async function clearPlatformCookie(platform) {
     if (!confirmed) return;
 
     try {
-        const res = await fetch(`/api/cookies/${encodeURIComponent(platform)}`, {
+        const res = await apiFetch(`/api/cookies/${encodeURIComponent(platform)}`, {
             method: 'DELETE'
         });
 
@@ -1255,7 +1543,7 @@ async function saveCustomHost() {
     }
 
     try {
-        const res = await fetch('/api/config/host', {
+        const res = await apiFetch('/api/config/host', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ customHost: val })
@@ -1281,7 +1569,13 @@ async function saveCustomHost() {
 }
 
 async function copyM3uUrl() {
-    let url = appState.status?.m3uUrl || `${window.location.origin}/jellyfin.m3u`;
+    let url = appState.status?.m3uUrl || '';
+
+    if (!url) {
+        openPlaybackSecurityModal();
+        showToast('请先生成或恢复独立播放令牌', 'warning');
+        return;
+    }
     
     // 如果当前通过 localhost / 127.0.0.1 访问，且配置中未设置 customHost，弹窗引导用户快速确认真实局域网 IP
     const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';

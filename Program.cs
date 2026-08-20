@@ -11,16 +11,16 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using LiveStreamGateway;
 
 // -------------------------------------------------------------
 // Top-Level Application Setup
 // -------------------------------------------------------------
+bool interactiveConsole = !Console.IsInputRedirected && !Console.IsOutputRedirected;
 try {
     Console.Title = "LiveStreamGateway - .NET 10";
-    Console.CursorVisible = false;
+    if (interactiveConsole) Console.CursorVisible = false;
     Console.OutputEncoding = Encoding.UTF8;
 } catch { }
 
@@ -35,6 +35,9 @@ Globals.LocalIp = GetLocalIPAddress();
 // Configure WebApplication
 var builder = WebApplication.CreateBuilder(args);
 
+// 容器环境中保留应用生命周期和故障日志，但关闭逐请求 Information 噪声。
+builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+
 // Configure Kestrel to listen on the specified port
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -44,8 +47,55 @@ builder.WebHost.ConfigureKestrel(options =>
 // Add Hosted Services for HealthCheck and UI Render
 builder.Services.AddHostedService<RenderService>();
 builder.Services.AddHostedService<StreamManagerService>();
+builder.Services.AddSingleton<AdminAuthService>();
 
 var app = builder.Build();
+var adminAuth = app.Services.GetRequiredService<AdminAuthService>();
+
+// 管理 API 安全边界：播放链路及健康检查保持公开，其余 /api/* 必须持有登录会话。
+// SameSite=Strict 会话 Cookie 配合自定义请求头，阻断常见 CSRF 表单请求。
+app.Use(async (context, next) =>
+{
+    context.Response.OnStarting(() =>
+    {
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        context.Response.Headers["X-Frame-Options"] = "DENY";
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+        if (context.Request.Path.StartsWithSegments("/api"))
+            context.Response.Headers["Cache-Control"] = "no-store";
+        return Task.CompletedTask;
+    });
+
+    string path = context.Request.Path.Value ?? "";
+    bool publicApi = path.Equals("/api/health", StringComparison.OrdinalIgnoreCase) ||
+                     path.Equals("/api/ready", StringComparison.OrdinalIgnoreCase) ||
+                     path.Equals("/api/auth/session", StringComparison.OrdinalIgnoreCase) ||
+                     path.Equals("/api/auth/login", StringComparison.OrdinalIgnoreCase) ||
+                     path.Equals("/api/auth/setup", StringComparison.OrdinalIgnoreCase);
+
+    if (context.Request.Path.StartsWithSegments("/api") && !publicApi)
+    {
+        if (!adminAuth.IsAuthenticated(context.Request))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.Headers["WWW-Authenticate"] = "LSG-Session realm=\"LiveStreamGateway\"";
+            await context.Response.WriteAsJsonAsync(new { error = "管理会话无效或已过期，请重新登录" });
+            return;
+        }
+
+        bool unsafeMethod = !HttpMethods.IsGet(context.Request.Method) &&
+                            !HttpMethods.IsHead(context.Request.Method) &&
+                            !HttpMethods.IsOptions(context.Request.Method);
+        if (unsafeMethod && context.Request.Headers["X-LSG-Request"] != "1")
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new { error = "缺少管理请求校验头" });
+            return;
+        }
+    }
+
+    await next();
+});
 
 // Enable default files (index.html) and static files from wwwroot (Web UI)
 app.UseDefaultFiles();
@@ -57,28 +107,232 @@ if (!Directory.Exists(Globals.HLS_FULL_PATH))
     Directory.CreateDirectory(Globals.HLS_FULL_PATH);
 }
 
-// Serve Static Files (HLS stream segments)
-app.UseStaticFiles(new StaticFileOptions
+// HLS 文件不通过通用静态目录暴露，避免绕过独立播放令牌；仅由下方受保护端点读取。
+
+// -------------------------------------------------------------
+// Management Authentication APIs
+// -------------------------------------------------------------
+
+app.MapGet("/api/auth/session", (HttpContext context) =>
 {
-    FileProvider = new PhysicalFileProvider(Globals.HLS_FULL_PATH),
-    RequestPath = "/stream",
-    ServeUnknownFileTypes = true,
-    DefaultContentType = "application/vnd.apple.mpegurl",
-    OnPrepareResponse = ctx =>
+    bool authenticated = adminAuth.IsAuthenticated(context.Request);
+    return Results.Json(new
     {
-        ctx.Context.Response.Headers.Append("Cache-Control", "no-cache, no-store, must-revalidate");
-        ctx.Context.Response.Headers.Append("Pragma", "no-cache");
-        ctx.Context.Response.Headers.Append("Expires", "0");
-        
-        if (ctx.File.Name.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+        authenticated,
+        setupRequired = !adminAuth.IsPasswordConfigured,
+        sessionLifetimeSeconds = (int)AdminAuthService.SessionLifetime.TotalSeconds,
+        secureTransport = context.Request.IsHttps
+    });
+});
+
+app.MapPost("/api/auth/login", (AuthLoginRequest request, HttpContext context) =>
+{
+    if (!adminAuth.IsPasswordConfigured)
+        return Results.Json(new { error = "管理员密码尚未初始化" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    if (request.Password.Length > 256)
+        return Results.BadRequest(new { error = "密码格式无效" });
+
+    string clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    bool valid = adminAuth.TryValidateCredentials(request.Password, clientKey, out bool rateLimited, out TimeSpan retryAfter);
+    if (!valid)
+    {
+        if (rateLimited)
         {
-            ctx.Context.Response.ContentType = "application/vnd.apple.mpegurl";
+            int seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+            context.Response.Headers["Retry-After"] = seconds.ToString();
+            Console.WriteLine($"[Security] 管理端登录触发限速，来源={clientKey}，等待={seconds}s");
+            return Results.Json(new { error = "登录尝试过于频繁，请稍后再试", retryAfterSeconds = seconds }, statusCode: StatusCodes.Status429TooManyRequests);
         }
-        else if (ctx.File.Name.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
-        {
-            ctx.Context.Response.ContentType = "video/mp2t";
-        }
+
+        return Results.Json(new { error = "密码错误" }, statusCode: StatusCodes.Status401Unauthorized);
     }
+
+    string token = adminAuth.CreateSession(request.Password);
+    AdminAuthService.AppendSessionCookie(context.Response, token, context.Request.IsHttps);
+    return Results.Ok(new { success = true, expiresInSeconds = (int)AdminAuthService.SessionLifetime.TotalSeconds });
+});
+
+app.MapPost("/api/auth/logout", (HttpContext context) =>
+{
+    adminAuth.RevokeSession(context.Request);
+    AdminAuthService.DeleteSessionCookie(context.Response, context.Request.IsHttps);
+    return Results.Ok(new { success = true });
+});
+
+// 首次安装兜底：只能从容器/主机回环地址初始化，避免局域网抢占管理员密码。
+app.MapPost("/api/auth/setup", async (HttpContext context) =>
+{
+    if (adminAuth.IsPasswordConfigured)
+        return Results.Conflict(new { error = "管理员密码已经初始化" });
+    if (!AdminAuthService.IsLoopbackRequest(context))
+        return Results.Json(new { error = "首次密码只能从服务器本机回环地址初始化" }, statusCode: StatusCodes.Status403Forbidden);
+
+    if (context.Request.ContentLength is > 2048)
+        return Results.BadRequest(new { error = "密码请求体过大" });
+
+    string password;
+    if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        AuthSetupRequest? request = await context.Request.ReadFromJsonAsync<AuthSetupRequest>();
+        password = request?.Password ?? "";
+    }
+    else
+    {
+        using var reader = new StreamReader(context.Request.Body, Encoding.UTF8, leaveOpen: true);
+        password = (await reader.ReadToEndAsync()).TrimEnd('\r', '\n');
+    }
+
+    string? passwordError = AdminAuthService.ValidateNewPassword(password);
+    if (passwordError != null)
+        return Results.BadRequest(new { error = passwordError });
+
+    PlaybackTokenCredentials playbackCredentials = PlaybackTokenProtector.Create(password);
+    lock (Globals.ConfigLock)
+    {
+        if (!string.IsNullOrWhiteSpace(Globals.Config.AdminPasswordHash))
+            return Results.Conflict(new { error = "管理员密码已经初始化" });
+        Globals.Config.AdminPasswordHash = AdminAuthService.HashPassword(password);
+        Globals.Config.PlaybackTokenHash = playbackCredentials.Hash;
+        Globals.Config.PlaybackTokenEncrypted = playbackCredentials.Encrypted;
+    }
+
+    if (!await SaveConfigAsync())
+    {
+        lock (Globals.ConfigLock)
+        {
+            Globals.Config.AdminPasswordHash = "";
+            Globals.Config.PlaybackTokenHash = "";
+            Globals.Config.PlaybackTokenEncrypted = "";
+        }
+        return Results.Json(new { error = "密码配置写入失败" }, statusCode: StatusCodes.Status500InternalServerError);
+    }
+
+    adminAuth.InvalidateAllSessions();
+    string token = adminAuth.CreateSession(password);
+    AdminAuthService.AppendSessionCookie(context.Response, token, context.Request.IsHttps);
+    Console.WriteLine("[Security] 管理员密码与独立播放令牌已通过本机初始化");
+    return Results.Ok(new
+    {
+        success = true,
+        playbackToken = playbackCredentials.Token,
+        m3uPath = $"/p/{playbackCredentials.Token}/jellyfin.m3u"
+    });
+});
+
+app.MapPost("/api/auth/change-password", async (AuthPasswordChangeRequest request, HttpContext context) =>
+{
+    string? passwordError = AdminAuthService.ValidateNewPassword(request.NewPassword);
+    if (passwordError != null)
+        return Results.BadRequest(new { error = passwordError });
+    if (request.NewPassword == request.CurrentPassword)
+        return Results.BadRequest(new { error = "新密码不能与当前密码相同" });
+
+    string clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    bool valid = adminAuth.TryValidateCredentials(request.CurrentPassword, clientKey, out bool rateLimited, out TimeSpan retryAfter);
+    if (!valid)
+    {
+        if (rateLimited)
+        {
+            int seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+            context.Response.Headers["Retry-After"] = seconds.ToString();
+            return Results.Json(new { error = "验证尝试过于频繁，请稍后再试", retryAfterSeconds = seconds }, statusCode: StatusCodes.Status429TooManyRequests);
+        }
+        return Results.Json(new { error = "当前密码错误" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    string oldHash;
+    string oldPlaybackHash;
+    string oldPlaybackEncrypted;
+    lock (Globals.ConfigLock)
+    {
+        oldHash = Globals.Config.AdminPasswordHash;
+        oldPlaybackHash = Globals.Config.PlaybackTokenHash;
+        oldPlaybackEncrypted = Globals.Config.PlaybackTokenEncrypted;
+    }
+
+    string playbackToken;
+    if (string.IsNullOrWhiteSpace(oldPlaybackHash) && string.IsNullOrWhiteSpace(oldPlaybackEncrypted))
+    {
+        playbackToken = PlaybackTokenProtector.Create(request.CurrentPassword).Token;
+    }
+    else if (!PlaybackTokenProtector.TryUnprotect(oldPlaybackEncrypted, request.CurrentPassword, out playbackToken) ||
+             !PlaybackTokenProtector.ValidateToken(playbackToken, oldPlaybackHash))
+    {
+        return Results.Json(new { error = "无法解密现有播放令牌，密码未更改；请先修复配置或轮换播放令牌" }, statusCode: StatusCodes.Status500InternalServerError);
+    }
+
+    string newPlaybackHash = PlaybackTokenProtector.HashToken(playbackToken);
+    string newPlaybackEncrypted = PlaybackTokenProtector.Protect(playbackToken, request.NewPassword);
+    lock (Globals.ConfigLock)
+    {
+        Globals.Config.AdminPasswordHash = AdminAuthService.HashPassword(request.NewPassword);
+        Globals.Config.PlaybackTokenHash = newPlaybackHash;
+        Globals.Config.PlaybackTokenEncrypted = newPlaybackEncrypted;
+    }
+
+    if (!await SaveConfigAsync())
+    {
+        lock (Globals.ConfigLock)
+        {
+            Globals.Config.AdminPasswordHash = oldHash;
+            Globals.Config.PlaybackTokenHash = oldPlaybackHash;
+            Globals.Config.PlaybackTokenEncrypted = oldPlaybackEncrypted;
+        }
+        return Results.Json(new { error = "新密码写入失败" }, statusCode: StatusCodes.Status500InternalServerError);
+    }
+
+    adminAuth.InvalidateAllSessions();
+    string token = adminAuth.CreateSession(request.NewPassword);
+    AdminAuthService.AppendSessionCookie(context.Response, token, context.Request.IsHttps);
+    Console.WriteLine("[Security] 管理员密码已修改，旧会话已全部失效");
+    return Results.Ok(new { success = true });
+});
+
+app.MapPost("/api/playback-token/rotate", async (PlaybackTokenRotateRequest request, HttpContext context) =>
+{
+    if (request.CurrentPassword.Length > 256)
+        return Results.BadRequest(new { error = "密码格式无效" });
+
+    string clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    bool valid = adminAuth.TryValidateCredentials(request.CurrentPassword, clientKey, out bool rateLimited, out TimeSpan retryAfter);
+    if (!valid)
+    {
+        if (rateLimited)
+        {
+            int seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+            context.Response.Headers["Retry-After"] = seconds.ToString();
+            return Results.Json(new { error = "验证尝试过于频繁，请稍后再试", retryAfterSeconds = seconds }, statusCode: StatusCodes.Status429TooManyRequests);
+        }
+        return Results.Json(new { error = "当前管理员密码错误" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    PlaybackTokenCredentials credentials = PlaybackTokenProtector.Create(request.CurrentPassword);
+    string oldHash;
+    string oldEncrypted;
+    lock (Globals.ConfigLock)
+    {
+        oldHash = Globals.Config.PlaybackTokenHash;
+        oldEncrypted = Globals.Config.PlaybackTokenEncrypted;
+        Globals.Config.PlaybackTokenHash = credentials.Hash;
+        Globals.Config.PlaybackTokenEncrypted = credentials.Encrypted;
+    }
+
+    if (!await SaveConfigAsync())
+    {
+        lock (Globals.ConfigLock)
+        {
+            Globals.Config.PlaybackTokenHash = oldHash;
+            Globals.Config.PlaybackTokenEncrypted = oldEncrypted;
+        }
+        return Results.Json(new { error = "播放令牌写入失败，旧令牌仍然有效" }, statusCode: StatusCodes.Status500InternalServerError);
+    }
+
+    adminAuth.InvalidateAllSessions();
+    string sessionToken = adminAuth.CreateSession(request.CurrentPassword);
+    AdminAuthService.AppendSessionCookie(context.Response, sessionToken, context.Request.IsHttps);
+    string m3uUrl = $"{ResolveEffectiveBaseUrl(context.Request)}/p/{credentials.Token}/jellyfin.m3u";
+    Console.WriteLine("[Security] 独立播放令牌已轮换，旧 M3U/HLS 地址立即失效");
+    return Results.Ok(new { success = true, playbackToken = credentials.Token, m3uUrl });
 });
 
 // -------------------------------------------------------------
@@ -269,6 +523,11 @@ app.MapGet("/api/status", (HttpRequest request) =>
 {
     var uptime = DateTime.UtcNow - Globals.StartTimeUtc;
     var channelStatusList = new List<object>();
+    bool playbackTokenAvailable = adminAuth.TryGetPlaybackToken(request, out string playbackToken);
+    string playbackPrefix = playbackTokenAvailable ? $"/p/{Uri.EscapeDataString(playbackToken)}" : "";
+    bool playbackTokenConfigured;
+    lock (Globals.ConfigLock)
+        playbackTokenConfigured = !string.IsNullOrWhiteSpace(Globals.Config.PlaybackTokenHash);
 
     string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
     string displayHost = "";
@@ -317,8 +576,8 @@ app.MapGet("/api/status", (HttpRequest request) =>
                 isCookieNetworkError = cookieStatus?.IsNetworkError ?? false,
                 cookieUsername = cookieStatus?.Username ?? "",
                 cookieStatusMessage = cookieStatus?.Message ?? "",
-                hlsUrl = $"/live/{channel.Id}/stream.m3u8",
-                fullHlsUrl = $"{effectiveBaseUrl}/live/{channel.Id}/stream.m3u8"
+                hlsUrl = playbackTokenAvailable ? $"{playbackPrefix}/live/{channel.Id}/stream.m3u8" : (string?)null,
+                fullHlsUrl = playbackTokenAvailable ? $"{effectiveBaseUrl}{playbackPrefix}/live/{channel.Id}/stream.m3u8" : (string?)null
             });
         }
     }
@@ -333,7 +592,9 @@ app.MapGet("/api/status", (HttpRequest request) =>
         httpPort = request.Host.Port ?? Globals.HTTP_PORT,
         displayHost = displayHost,
         customHost = Globals.Config.CustomHost ?? "",
-        m3uUrl = $"{effectiveBaseUrl}/jellyfin.m3u",
+        m3uUrl = playbackTokenAvailable ? $"{effectiveBaseUrl}{playbackPrefix}/jellyfin.m3u" : (string?)null,
+        playbackTokenConfigured,
+        playbackTokenAvailable,
         uptimeSeconds = (int)uptime.TotalSeconds,
         uptimeText = $"{(int)uptime.TotalHours}小时 {uptime.Minutes}分 {uptime.Seconds}秒",
         activeStreams = activeCount,
@@ -343,16 +604,33 @@ app.MapGet("/api/status", (HttpRequest request) =>
     });
 });
 
-// 2. 获取配置 (Channels + CookieProfiles + CookieStatuses + CustomHost)
+// 2. 获取配置（绝不回传管理员哈希、Cookie 原文或频道运行时 Cookie 副本）
 app.MapGet("/api/config", () =>
 {
     lock (Globals.ConfigLock)
     {
+        var safeChannels = Globals.Config.Channels.Select(channel => new
+        {
+            id = channel.Id,
+            name = channel.Name,
+            platform = channel.Platform,
+            url = channel.Url,
+            quality = channel.Quality,
+            cookieProfileKey = channel.CookieProfileKey ?? "",
+            enable = channel.Enable
+        }).ToArray();
+        var cookieConfigured = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["huya"] = Globals.Config.CookieProfiles.TryGetValue("huya", out string? huya) && !string.IsNullOrWhiteSpace(huya),
+            ["douyu"] = Globals.Config.CookieProfiles.TryGetValue("douyu", out string? douyu) && !string.IsNullOrWhiteSpace(douyu),
+            ["bilibili"] = Globals.Config.CookieProfiles.TryGetValue("bilibili", out string? bilibili) && !string.IsNullOrWhiteSpace(bilibili)
+        };
+
         return Results.Json(new
         {
             customHost = Globals.Config.CustomHost ?? "",
-            channels = Globals.Config.Channels,
-            cookieProfiles = Globals.Config.CookieProfiles,
+            channels = safeChannels,
+            cookieConfigured,
             cookieStatuses = Globals.PlatformCookieStatuses
         });
     }
@@ -536,7 +814,7 @@ app.MapPost("/api/cookies", async (CookieProfileRequest req) =>
     // 自动发起一次有效性检测
     var status = await Globals.CheckPlatformCookieAsync(key);
 
-    return Results.Ok(new { success = true, key, cookie = req.Cookie ?? "", status, statuses = Globals.PlatformCookieStatuses });
+    return Results.Ok(new { success = true, key, configured = !string.IsNullOrWhiteSpace(req.Cookie), status, statuses = Globals.PlatformCookieStatuses });
 });
 
 // 8. 清空指定平台 Cookie
@@ -600,10 +878,13 @@ app.MapPost("/api/config/host", async (JsonNode body) =>
     return Results.Ok(new { success = true, customHost = host });
 });
 
-// Master Playlist Endpoint - 指向动态代理而非静态文件
-app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
+// 独立播放令牌不依赖网页登录会话；随机路径适配 Jellyfin/IPTV 长期远程拉取。
+app.MapGet("/p/{playbackToken}/jellyfin.m3u", (string playbackToken, HttpRequest request, HttpResponse response) =>
 {
+    if (!IsPlaybackTokenValid(playbackToken)) return Results.NotFound();
+    SetNoStoreHeaders(response);
     string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
+    string playbackPrefix = $"/p/{Uri.EscapeDataString(playbackToken)}";
 
     var m3uContent = new StringBuilder("#EXTM3U\n");
     lock (Globals.ConfigLock)
@@ -612,7 +893,7 @@ app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
         {
             if (!channel.Enable) continue;
             m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\" group-title=\"{channel.Platform}\",{channel.Name}");
-            m3uContent.AppendLine($"{effectiveBaseUrl}/live/{channel.Id}/stream.m3u8");
+            m3uContent.AppendLine($"{effectiveBaseUrl}{playbackPrefix}/live/{channel.Id}/stream.m3u8");
         }
     }
     
@@ -624,6 +905,8 @@ app.MapGet("/jellyfin.m3u", (HttpRequest request) =>
 app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId, HttpContext ctx) =>
 {
     SetNoStoreHeaders(ctx.Response);
+    if (!AdminAuthService.IsLoopbackRequest(ctx))
+        return Results.NotFound();
 
     if (Globals.Extractors.TryGetValue(channelId, out var extractor) && extractor is HuyaExtractor huyaExtractor)
     {
@@ -713,9 +996,10 @@ app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId, Http
 
 // 动态 m3u8 代理端点：读取 FFmpeg 生成的 stream.m3u8，剥除 #EXT-X-ENDLIST 标记
 // OnDemand 模式：首次请求触发 FFmpeg 启动；后续请求更新最后访问时间，超时则自动停流
-app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext ctx) =>
+app.MapGet("/p/{playbackToken}/live/{channelId}/stream.m3u8", async (string playbackToken, string channelId, HttpContext ctx) =>
 {
     SetNoStoreHeaders(ctx.Response);
+    if (!IsPlaybackTokenValid(playbackToken)) return Results.NotFound();
     string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channelId, "stream.m3u8");
 
     // 检查频道是否存在且已启用
@@ -784,16 +1068,22 @@ app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext
     }
 });
 
-// .ts 分片也需要通过 /live/ 路径返回（因为 m3u8 中的路径是相对的）
-app.MapGet("/live/{channelId}/{fileName}.ts", (string channelId, string fileName, HttpContext ctx) =>
+// .ts 分片通过同一受保护路径返回；m3u8 中的相对引用会自然继承 token 路径。
+app.MapGet("/p/{playbackToken}/live/{channelId}/{fileName}.ts", (string playbackToken, string channelId, string fileName, HttpContext ctx) =>
 {
     SetNoStoreHeaders(ctx.Response);
-    if (string.IsNullOrWhiteSpace(fileName) ||
+    if (!IsPlaybackTokenValid(playbackToken) ||
+        string.IsNullOrWhiteSpace(fileName) ||
         fileName.Contains("..", StringComparison.Ordinal) ||
         !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
     {
         return Results.NotFound();
     }
+
+    bool channelEnabled;
+    lock (Globals.ConfigLock)
+        channelEnabled = Globals.Config.Channels.Any(c => c.Id == channelId && c.Enable);
+    if (!channelEnabled) return Results.NotFound();
 
     string tsPath = Path.Combine(Globals.HLS_FULL_PATH, channelId, $"{fileName}.ts");
     if (!File.Exists(tsPath))
@@ -830,7 +1120,12 @@ app.MapGet("/api/metrics", () =>
                 startCount = metrics?.StartCount ?? 0,
                 restartCount = metrics?.RestartCount ?? 0,
                 errorCount = metrics?.ErrorCount ?? 0,
+                probeCount = metrics?.ProbeCount ?? 0,
+                offlineProbeCount = metrics?.OfflineProbeCount ?? 0,
                 lastStateChange = metrics?.LastStateChange,
+                lastProbeAt = metrics?.LastProbeAt,
+                lastErrorAt = metrics?.LastErrorAt,
+                lastRestartReason = metrics?.LastRestartReason ?? "",
                 lastClientAccess = lastAccess == default ? (DateTime?)null : lastAccess
             });
         }
@@ -842,44 +1137,22 @@ app.MapGet("/api/metrics", () =>
     });
 });
 
-// GET /api/health - 健康检查（区分 Web API 正常 / 频道待机 / 推流中 / FFmpeg 缺失）
-app.MapGet("/api/health", () =>
+// 健康检查：正常下播属于 idle；FFmpeg 缺失、明确错误或卡死状态会返回 HTTP 503。
+app.MapGet("/api/health", BuildHealthResult);
+app.MapGet("/api/ready", BuildHealthResult);
+
+Globals.HttpServerStatus = $"服务已启动，管理后台：http://{Globals.LocalIp}:{Globals.HTTP_PORT}（M3U 地址请登录后复制）";
+
+// 仅交互式终端监听回车；Docker 的 stdin=/dev/null 会立即返回 null，绝不能据此停止宿主。
+if (interactiveConsole)
 {
-    int streaming = 0, idle = 0, disabled = 0, error = 0;
-    lock (Globals.StatusLock)
+    _ = Task.Run(async () =>
     {
-        foreach (var s in Globals.ChannelStatuses)
-        {
-            switch (s.State)
-            {
-                case ChannelState.Streaming: streaming++; break;
-                case ChannelState.Ready:
-                case ChannelState.Offline: idle++; break;
-                case ChannelState.Disabled: disabled++; break;
-                default: error++; break;
-            }
-        }
-    }
-    return Results.Json(new
-    {
-        version = Globals.APP_VERSION,
-        status = "healthy",
-        streaming,
-        idle,
-        disabled,
-        error,
-        uptime = (int)(DateTime.UtcNow - Globals.StartTimeUtc).TotalSeconds
+        string? line = Console.ReadLine();
+        if (line != null)
+            await app.StopAsync();
     });
-});
-
-Globals.HttpServerStatus = $"服务已启动，播放列表地址：http://{Globals.LocalIp}:{Globals.HTTP_PORT}/jellyfin.m3u";
-
-// We want to handle graceful exit on enter key
-_ = Task.Run(async () =>
-{
-    Console.ReadLine();
-    await app.StopAsync();
-});
+}
 
 try
 {
@@ -887,8 +1160,11 @@ try
 }
 finally
 {
-    try { Console.CursorVisible = true; } catch { }
-    try { Console.Clear(); } catch { }
+    if (interactiveConsole)
+    {
+        try { Console.CursorVisible = true; } catch { }
+        try { Console.Clear(); } catch { }
+    }
     Console.WriteLine("服务器已停止。");
 }
 
@@ -973,6 +1249,12 @@ static async Task<bool> SaveConfigAsync()
         }
 
         await File.WriteAllTextAsync(configPath, jsonString, Encoding.UTF8);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                configPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
         return true;
     }
     catch (Exception ex)
@@ -1124,11 +1406,79 @@ static string GetLocalIPAddress()
     }
 }
 
+static IResult BuildHealthResult()
+{
+    int streaming = 0, idle = 0, disabled = 0, transitional = 0, error = 0, stuck = 0;
+    HashSet<string> enabledIds;
+    lock (Globals.ConfigLock)
+        enabledIds = Globals.Config.Channels.Where(c => c.Enable).Select(c => c.Id).ToHashSet(StringComparer.Ordinal);
+
+    lock (Globals.StatusLock)
+    {
+        foreach (var status in Globals.ChannelStatuses)
+        {
+            if (!enabledIds.Contains(status.Id) || status.State == ChannelState.Disabled)
+            {
+                disabled++;
+                continue;
+            }
+
+            switch (status.State)
+            {
+                case ChannelState.Streaming:
+                    streaming++;
+                    break;
+                case ChannelState.Ready:
+                case ChannelState.Offline:
+                    idle++;
+                    break;
+                case ChannelState.Starting:
+                case ChannelState.Restarting:
+                case ChannelState.Stopping:
+                    transitional++;
+                    if (Globals.Metrics.TryGetValue(status.Id, out var metrics) &&
+                        metrics.LastStateChange.HasValue &&
+                        DateTime.UtcNow - metrics.LastStateChange.Value > TimeSpan.FromSeconds(60))
+                        stuck++;
+                    break;
+                case ChannelState.Error:
+                default:
+                    error++;
+                    break;
+            }
+        }
+    }
+
+    bool ffmpegAvailable = StreamManagerService.IsFfmpegAvailable;
+    bool healthy = ffmpegAvailable && error == 0 && stuck == 0;
+    return Results.Json(new
+    {
+        version = Globals.APP_VERSION,
+        status = healthy ? "healthy" : "degraded",
+        ffmpegAvailable,
+        streaming,
+        idle,
+        disabled,
+        transitional,
+        error,
+        stuck,
+        uptime = (int)(DateTime.UtcNow - Globals.StartTimeUtc).TotalSeconds
+    }, statusCode: healthy ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+}
+
 static void SetNoStoreHeaders(HttpResponse response)
 {
     response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
     response.Headers["Pragma"] = "no-cache";
     response.Headers["Expires"] = "0";
+}
+
+static bool IsPlaybackTokenValid(string? token)
+{
+    string tokenHash;
+    lock (Globals.ConfigLock)
+        tokenHash = Globals.Config.PlaybackTokenHash ?? "";
+    return PlaybackTokenProtector.ValidateToken(token, tokenHash);
 }
 
 static bool IsFreshNonEmptyFile(string path, TimeSpan maxAge)
@@ -1234,8 +1584,11 @@ static void ShowError(string message)
     Console.ForegroundColor = ConsoleColor.Red;
     Console.WriteLine($"\n{message}");
     Console.ResetColor();
-    Console.WriteLine("按任意键退出...");
-    Console.ReadKey();
+    if (!Console.IsInputRedirected)
+    {
+        Console.WriteLine("按任意键退出...");
+        Console.ReadKey();
+    }
 }
 
 // -------------------------------------------------------------
@@ -1265,6 +1618,12 @@ public enum ChannelState
 public class AppConfig
 {
     public string CustomHost { get; set; } = "";
+    /// <summary>管理员密码的 PBKDF2-SHA256 自包含哈希；永不通过管理 API 返回。</summary>
+    public string AdminPasswordHash { get; set; } = "";
+    /// <summary>独立播放令牌的 SHA-256 摘要，用于固定时间校验公开播放路径。</summary>
+    public string PlaybackTokenHash { get; set; } = "";
+    /// <summary>播放令牌的 AES-256-GCM 密文，仅用于登录后恢复订阅地址；原文不落盘。</summary>
+    public string PlaybackTokenEncrypted { get; set; } = "";
     /// <summary>推流模式：AlwaysOn（始终推流，默认）或 OnDemand（按需推流，无人观看时停止 FFmpeg）</summary>
     public string StreamingMode { get; set; } = "AlwaysOn";
     /// <summary>OnDemand 模式：最后一次 m3u8 请求后多久无新请求则停止 FFmpeg（秒），默认 300 秒</summary>
@@ -1322,13 +1681,18 @@ public class ChannelMetrics
     public int StartCount { get; set; } = 0;
     public int RestartCount { get; set; } = 0;
     public int ErrorCount { get; set; } = 0;
+    public long ProbeCount { get; set; } = 0;
+    public long OfflineProbeCount { get; set; } = 0;
     public DateTime? LastStateChange { get; set; }
     public DateTime? LastClientAccess { get; set; }
+    public DateTime? LastProbeAt { get; set; }
+    public DateTime? LastErrorAt { get; set; }
+    public string LastRestartReason { get; set; } = "";
 }
 
 public static class Globals
 {
-    public const string APP_VERSION = "v1.5.2";
+    public const string APP_VERSION = "v1.5.3";
     public const int HTTP_PORT = 9898;
     public const string HLS_DIR = "hls_stream";
     public const int HLS_MANIFEST_FRESH_SECONDS = 30;
@@ -1386,13 +1750,52 @@ public static class Globals
 
     public static void UpdateState(string channelId, ChannelState newState)
     {
+        bool changed = false;
         lock (StatusLock)
         {
             var status = ChannelStatuses.FirstOrDefault(c => c.Id == channelId);
-            if (status != null) status.State = newState;
+            if (status != null && status.State != newState)
+            {
+                status.State = newState;
+                changed = true;
+            }
         }
+        if (changed)
+        {
+            var metrics = Metrics.GetOrAdd(channelId, _ => new ChannelMetrics());
+            lock (metrics) metrics.LastStateChange = DateTime.UtcNow;
+        }
+    }
+
+    public static void RecordProbe(string channelId, bool offline = false)
+    {
         var metrics = Metrics.GetOrAdd(channelId, _ => new ChannelMetrics());
-        metrics.LastStateChange = DateTime.UtcNow;
+        lock (metrics)
+        {
+            metrics.ProbeCount++;
+            if (offline) metrics.OfflineProbeCount++;
+            metrics.LastProbeAt = DateTime.UtcNow;
+        }
+    }
+
+    public static void RecordError(string channelId)
+    {
+        var metrics = Metrics.GetOrAdd(channelId, _ => new ChannelMetrics());
+        lock (metrics)
+        {
+            metrics.ErrorCount++;
+            metrics.LastErrorAt = DateTime.UtcNow;
+        }
+    }
+
+    public static void RecordRestart(string channelId, string reason)
+    {
+        var metrics = Metrics.GetOrAdd(channelId, _ => new ChannelMetrics());
+        lock (metrics)
+        {
+            metrics.RestartCount++;
+            metrics.LastRestartReason = reason;
+        }
     }
 
     public static ChannelState GetState(string channelId)
@@ -1456,6 +1859,14 @@ public class RenderService : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (Console.IsOutputRedirected)
+        {
+            Console.WriteLine("[Console] 检测到重定向输出，已禁用每秒仪表盘重绘；请使用 Web 管理端和结构化生命周期日志。");
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken); }
+            catch (OperationCanceledException) { }
+            return;
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try 
@@ -1527,6 +1938,7 @@ public class StreamManagerService : BackgroundService
     private const int HEALTH_CHECK_SECONDS = 10;
     private const int STALE_THRESHOLD_SECONDS = 30;
     private static readonly string? FFMPEG_EXE_PATH = ResolveFfmpegPath();
+    public static bool IsFfmpegAvailable => !string.IsNullOrEmpty(FFMPEG_EXE_PATH) && File.Exists(FFMPEG_EXE_PATH);
 
     // 每个频道对应一个 StreamingSession（包含 Process + 日志资源，可靠释放）
     private readonly ConcurrentDictionary<string, StreamingSession> _sessions = new();
@@ -1545,6 +1957,23 @@ public class StreamManagerService : BackgroundService
     {
         Globals.StreamManager = this;
     }
+
+    private static bool IsOfflineResult(string? error) =>
+        error?.Contains("未开播", StringComparison.OrdinalIgnoreCase) == true ||
+        error?.Contains("Not Live", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool IsAuthenticationError(string? error) =>
+        error?.Contains("Cookie", StringComparison.OrdinalIgnoreCase) == true ||
+        error?.Contains("登录", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static string SafeLogValue(string? value)
+    {
+        string safe = (value ?? "").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return safe.Length <= 180 ? safe : safe[..180];
+    }
+
+    private static void LogLifecycle(string channelId, string eventName, string details) =>
+        Console.WriteLine($"[StreamLifecycle] channel={SafeLogValue(channelId)} event={SafeLogValue(eventName)} {SafeLogValue(details)}");
 
     public void NotifyConfigChanged()
     {
@@ -1579,6 +2008,8 @@ public class StreamManagerService : BackgroundService
             if (channel == null || status == null)
                 return;
 
+            Globals.RecordRestart(channelId, "manual");
+            LogLifecycle(channelId, "restart", "reason=manual");
             Globals.UpdateState(channelId, ChannelState.Restarting);
             Globals.UpdateStatus(channelId, "手动重启中...", ConsoleColor.Yellow);
             await StopSessionAsync(channelId);
@@ -1838,25 +2269,29 @@ public class StreamManagerService : BackgroundService
                         {
                             _lastProbeTimes[channel.Id] = DateTime.UtcNow;
                             var (probeUrl, probeErr) = await GetSourceStreamUrlAsync(channel, stoppingToken);
+                            bool isOfflineResult = IsOfflineResult(probeErr);
+                            Globals.RecordProbe(channel.Id, isOfflineResult);
                             if (!string.IsNullOrEmpty(probeUrl))
                             {
                                 Globals.UpdateState(channel.Id, ChannelState.Ready);
                                 Globals.UpdateStatus(channel.Id, "已开播", ConsoleColor.Cyan);
                                 status.RetryCount = 0;
                             }
-                            else if (probeErr?.Contains("未开播") == true || probeErr?.Contains("Not Live") == true)
+                            else if (isOfflineResult)
                             {
                                 Globals.UpdateState(channel.Id, ChannelState.Offline);
                                 Globals.UpdateStatus(channel.Id, "未开播", ConsoleColor.DarkYellow);
                                 status.RetryCount = 0;
                             }
-                            else if (probeErr?.Contains("Cookie") == true || probeErr?.Contains("登录") == true)
+                            else if (IsAuthenticationError(probeErr))
                             {
+                                Globals.RecordError(channel.Id);
                                 Globals.UpdateState(channel.Id, ChannelState.Error);
                                 Globals.UpdateStatus(channel.Id, "Cookie失效或需登录", ConsoleColor.Red);
                             }
                             else
                             {
+                                Globals.RecordError(channel.Id);
                                 Globals.UpdateState(channel.Id, ChannelState.Offline);
                                 Globals.UpdateStatus(channel.Id, string.IsNullOrEmpty(probeErr) ? "未开播" : probeErr, ConsoleColor.DarkYellow);
                             }
@@ -1875,8 +2310,20 @@ public class StreamManagerService : BackgroundService
                                            metrics.LastStateChange.HasValue &&
                                            (DateTime.UtcNow - metrics.LastStateChange.Value).TotalSeconds > 30;
 
-                    if (currentState != ChannelState.Starting && currentState != ChannelState.Restarting || isStuckStarting)
+                    bool probeThrottled = (currentState == ChannelState.Offline || currentState == ChannelState.Error) &&
+                                          _lastProbeTimes.TryGetValue(channel.Id, out var lastProbe) &&
+                                          (DateTime.UtcNow - lastProbe).TotalSeconds < 30;
+
+                    if (isStuckStarting)
                     {
+                        Globals.RecordRestart(channel.Id, "state-stuck");
+                        LogLifecycle(channel.Id, "restart", $"reason=state-stuck state={currentState}");
+                    }
+
+                    if (!probeThrottled &&
+                        (currentState != ChannelState.Starting && currentState != ChannelState.Restarting || isStuckStarting))
+                    {
+                        _lastProbeTimes[channel.Id] = DateTime.UtcNow;
                         await StartSingleChannelAsync(channel, status, stoppingToken);
                     }
                     continue;
@@ -1887,8 +2334,11 @@ public class StreamManagerService : BackgroundService
                 {
                     if (session.Process.HasExited)
                     {
-                        var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
-                        metrics.RestartCount++;
+                        int? exitCode = null;
+                        try { exitCode = session.Process.ExitCode; } catch { }
+                        Globals.RecordRestart(channel.Id, "ffmpeg-exited");
+                        Globals.RecordError(channel.Id);
+                        LogLifecycle(channel.Id, "restart", $"reason=ffmpeg-exited exitCode={exitCode?.ToString() ?? "unknown"}");
                         Globals.UpdateStatus(channel.Id, "FFmpeg 进程已退出，正在重启...", ConsoleColor.Yellow);
                         Globals.UpdateState(channel.Id, ChannelState.Restarting);
                         await StopSessionAsync(channel.Id);
@@ -1904,8 +2354,10 @@ public class StreamManagerService : BackgroundService
                             var lastWrite = File.GetLastWriteTimeUtc(m3u8Path);
                             if ((DateTime.UtcNow - lastWrite).TotalSeconds > STALE_THRESHOLD_SECONDS)
                             {
-                                var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
-                                metrics.RestartCount++;
+                                double manifestAgeSeconds = (DateTime.UtcNow - lastWrite).TotalSeconds;
+                                Globals.RecordRestart(channel.Id, "manifest-stale");
+                                Globals.RecordError(channel.Id);
+                                LogLifecycle(channel.Id, "restart", $"reason=manifest-stale ageSeconds={manifestAgeSeconds:F1}");
                                 Globals.UpdateStatus(channel.Id, "HLS 文件陈旧（推流卡死），正在强制重启...", ConsoleColor.Red);
                                 Globals.UpdateState(channel.Id, ChannelState.Restarting);
                                 await StopSessionAsync(channel.Id);
@@ -1924,29 +2376,33 @@ public class StreamManagerService : BackgroundService
                             int startupTimeout = Globals.Config.StartupTimeoutSeconds > 0 ? Globals.Config.StartupTimeoutSeconds : 30;
                             if ((DateTime.UtcNow - session.CreatedAtUtc).TotalSeconds > startupTimeout)
                             {
-                                var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
-                                metrics.ErrorCount++;
+                                double sessionAgeSeconds = (DateTime.UtcNow - session.CreatedAtUtc).TotalSeconds;
+                                LogLifecycle(channel.Id, "startup-timeout", $"ageSeconds={sessionAgeSeconds:F1} timeoutSeconds={startupTimeout}");
 
                                 // 终止卡死/无响应的 FFmpeg 会话
                                 await StopSessionAsync(channel.Id);
 
                                 // 探测上游直播源是否已下播或鉴权失效
                                 var (probeUrl, probeErr) = await GetSourceStreamUrlAsync(channel, stoppingToken);
+                                bool isOfflineResult = IsOfflineResult(probeErr);
+                                Globals.RecordProbe(channel.Id, isOfflineResult);
                                 if (string.IsNullOrEmpty(probeUrl))
                                 {
-                                    if (probeErr?.Contains("未开播") == true || probeErr?.Contains("Not Live") == true)
+                                    if (isOfflineResult)
                                     {
                                         Globals.UpdateStatus(channel.Id, "未开播", ConsoleColor.DarkYellow);
                                         Globals.UpdateState(channel.Id, ChannelState.Offline);
                                         status.RetryCount = 0;
                                     }
-                                    else if (probeErr?.Contains("Cookie") == true || probeErr?.Contains("登录") == true)
+                                    else if (IsAuthenticationError(probeErr))
                                     {
+                                        Globals.RecordError(channel.Id);
                                         Globals.UpdateStatus(channel.Id, "Cookie失效或需登录", ConsoleColor.Red);
                                         Globals.UpdateState(channel.Id, ChannelState.Error);
                                     }
                                     else
                                     {
+                                        Globals.RecordError(channel.Id);
                                         Globals.UpdateStatus(channel.Id, $"获取源失败: {probeErr}", ConsoleColor.Red);
                                         Globals.UpdateState(channel.Id, ChannelState.Error);
                                     }
@@ -1954,6 +2410,9 @@ public class StreamManagerService : BackgroundService
                                 else
                                 {
                                     // 上游在线但推流进程启动超时，触发重启重试
+                                    Globals.RecordError(channel.Id);
+                                    Globals.RecordRestart(channel.Id, "startup-timeout");
+                                    LogLifecycle(channel.Id, "restart", "reason=startup-timeout upstream=online");
                                     Globals.UpdateStatus(channel.Id, "推流启动超时，正在重试...", ConsoleColor.Yellow);
                                     Globals.UpdateState(channel.Id, ChannelState.Restarting);
                                     await StartSingleChannelAsync(channel, status, stoppingToken);
@@ -2151,6 +2610,8 @@ public class StreamManagerService : BackgroundService
         }
         catch (Exception ex)
         {
+            Globals.RecordError(channel.Id);
+            LogLifecycle(channel.Id, "start-failed", "reason=hls-directory");
             Globals.UpdateStatus(channel.Id, $"无法清理目录: {ex.Message}", ConsoleColor.Red);
             Globals.UpdateState(channel.Id, ChannelState.Error);
             return;
@@ -2159,6 +2620,8 @@ public class StreamManagerService : BackgroundService
         Globals.UpdateStatus(channel.Id, "正在获取直播源...", ConsoleColor.DarkGray);
 
         var (sourceStreamUrl, error) = await GetSourceStreamUrlAsync(channel, ct);
+        bool isOfflineResult = IsOfflineResult(error);
+        Globals.RecordProbe(channel.Id, isOfflineResult);
 
         if (string.IsNullOrEmpty(sourceStreamUrl))
         {
@@ -2166,7 +2629,7 @@ public class StreamManagerService : BackgroundService
             ConsoleColor color;
             bool retryInc = true;
 
-            if (error?.Contains("未开播") == true || error?.Contains("Not Live") == true)
+            if (isOfflineResult)
             {
                 errorMsg = "未开播";
                 color = ConsoleColor.DarkYellow;
@@ -2174,7 +2637,7 @@ public class StreamManagerService : BackgroundService
                 status.RetryCount = 0;
                 Globals.UpdateState(channel.Id, ChannelState.Offline);
             }
-            else if (error?.Contains("Cookie") == true || error?.Contains("登录") == true)
+            else if (IsAuthenticationError(error))
             {
                 errorMsg = "Cookie失效或需登录";
                 color = ConsoleColor.Red;
@@ -2188,8 +2651,11 @@ public class StreamManagerService : BackgroundService
             }
 
             Globals.UpdateStatus(channel.Id, errorMsg, color, incrementRetry: retryInc);
-            var me = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
-            me.ErrorCount++;
+            if (!isOfflineResult)
+            {
+                Globals.RecordError(channel.Id);
+                LogLifecycle(channel.Id, "source-unavailable", $"category={(IsAuthenticationError(error) ? "authentication" : "extractor")}");
+            }
             return;
         }
 
@@ -2206,10 +2672,13 @@ public class StreamManagerService : BackgroundService
             Globals.UpdateState(channel.Id, ChannelState.Starting);
             Globals.UpdateStatus(channel.Id, "已启动推流", ConsoleColor.Green);
             var metrics = Globals.Metrics.GetOrAdd(channel.Id, _ => new ChannelMetrics());
-            metrics.StartCount++;
+            lock (metrics) metrics.StartCount++;
+            LogLifecycle(channel.Id, "started", $"pid={newSession.Process.Id}");
         }
         else
         {
+            Globals.RecordError(channel.Id);
+            LogLifecycle(channel.Id, "start-failed", "reason=ffmpeg-process");
             Globals.UpdateStatus(channel.Id, "FFmpeg 进程启动失败", ConsoleColor.Red);
             Globals.UpdateState(channel.Id, ChannelState.Error);
         }
@@ -2260,27 +2729,37 @@ public class StreamManagerService : BackgroundService
             _          => "https://www.huya.com/"
         };
 
-        string arguments = $"-fflags +genpts+discardcorrupt -err_detect ignore_err "
-            + $"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -reconnect_on_network_error 1 "
-            + $"-rw_timeout 15000000 "
-            + $"-headers \"Referer: {referer}\\r\\n\" "
-            + $"-user_agent \"{userAgent}\" "
-            + $"-i \"{sourceStreamUrl}\" "
-            + $"-c:v copy -c:a copy -sn -f hls -hls_time 3 -hls_list_size 15 -hls_allow_cache 0 "
-            + $"-hls_delete_threshold 10 -hls_start_number_source epoch "
-            + $"-hls_segment_filename \"{segmentPath}\" "
-            + $"-hls_flags delete_segments+temp_file+discont_start+program_date_time "
-            + $"\"{m3u8Path}\"";
-
         var psi = new ProcessStartInfo
         {
             FileName = FFMPEG_EXE_PATH,
-            Arguments = arguments,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
         };
+
+        // ArgumentList 逐项传参，避免 URL、路径或 HTTP 头中的引号/空格被二次解析。
+        // FFmpeg 的 -headers 要求以真实 CRLF 结尾；字面量 "\\r\\n" 会产生启动警告。
+        string[] arguments =
+        [
+            "-hide_banner", "-nostats", "-loglevel", "warning",
+            "-fflags", "+genpts+discardcorrupt", "-err_detect", "ignore_err",
+            "-reconnect", "1", "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "10", "-reconnect_on_network_error", "1",
+            "-rw_timeout", "15000000",
+            "-headers", $"Referer: {referer}\r\n",
+            "-user_agent", userAgent,
+            "-i", sourceStreamUrl,
+            "-c:v", "copy", "-c:a", "copy", "-sn",
+            "-f", "hls", "-hls_time", "3", "-hls_list_size", "15",
+            "-hls_allow_cache", "0", "-hls_delete_threshold", "10",
+            "-hls_start_number_source", "epoch",
+            "-hls_segment_filename", segmentPath,
+            "-hls_flags", "delete_segments+temp_file+discont_start+program_date_time",
+            m3u8Path
+        ];
+        foreach (string argument in arguments)
+            psi.ArgumentList.Add(argument);
 
         try
         {
@@ -2306,6 +2785,7 @@ public class StreamManagerService : BackgroundService
 /// </summary>
 public sealed class StreamingSession : IAsyncDisposable
 {
+    private const long MaxLogBytes = 2 * 1024 * 1024;
     public Process Process { get; }
     public DateTime CreatedAtUtc { get; } = DateTime.UtcNow;
     private readonly StreamWriter _logWriter;
@@ -2313,33 +2793,45 @@ public sealed class StreamingSession : IAsyncDisposable
     private readonly CancellationTokenSource _cts;
     private readonly Task _stderrTask;
     private readonly Task _stdoutTask;
+    private long _loggedBytes;
+    private bool _limitNoticeWritten;
 
     public StreamingSession(Process process, string logFilePath)
     {
         Process = process;
-        _logWriter = new StreamWriter(logFilePath, append: true, Encoding.UTF8) { AutoFlush = false };
+        var logStream = new FileStream(logFilePath, FileMode.Create, FileAccess.Write, FileShare.Read);
+        _logWriter = new StreamWriter(logStream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) { AutoFlush = true };
         _logSemaphore = new SemaphoreSlim(1, 1);
         _cts = new CancellationTokenSource();
-        _stderrTask = Task.Run(() => DrainReaderAsync(process.StandardError, _logWriter, _logSemaphore, _cts.Token));
-        _stdoutTask = Task.Run(() => DrainReaderAsync(process.StandardOutput, _logWriter, _logSemaphore, _cts.Token));
+        _stderrTask = Task.Run(() => DrainReaderAsync(process.StandardError, _cts.Token));
+        _stdoutTask = Task.Run(() => DrainReaderAsync(process.StandardOutput, _cts.Token));
     }
 
-    private static async Task DrainReaderAsync(StreamReader reader, StreamWriter writer, SemaphoreSlim semaphore, CancellationToken ct)
+    private async Task DrainReaderAsync(StreamReader reader, CancellationToken ct)
     {
         try
         {
-            int lineCount = 0;
             while (!ct.IsCancellationRequested)
             {
                 string? line = await reader.ReadLineAsync(ct);
                 if (line == null) break;
-                await semaphore.WaitAsync(ct);
+                await _logSemaphore.WaitAsync(ct);
                 try
                 {
-                    await writer.WriteLineAsync(line.AsMemory(), ct);
-                    if (++lineCount % 20 == 0) await writer.FlushAsync(ct);
+                    long lineBytes = Encoding.UTF8.GetByteCount(line) + 1L;
+                    if (_loggedBytes + lineBytes <= MaxLogBytes)
+                    {
+                        await _logWriter.WriteLineAsync(line.AsMemory(), ct);
+                        _loggedBytes += lineBytes;
+                    }
+                    else if (!_limitNoticeWritten)
+                    {
+                        const string notice = "[LiveStreamGateway] FFmpeg 日志达到 2 MiB 上限，后续输出已丢弃。";
+                        await _logWriter.WriteLineAsync(notice.AsMemory(), ct);
+                        _limitNoticeWritten = true;
+                    }
                 }
-                finally { semaphore.Release(); }
+                finally { _logSemaphore.Release(); }
             }
         }
         catch (OperationCanceledException) { }
@@ -2348,8 +2840,8 @@ public sealed class StreamingSession : IAsyncDisposable
         {
             try
             {
-                await semaphore.WaitAsync(CancellationToken.None);
-                try { await writer.FlushAsync(CancellationToken.None); } finally { semaphore.Release(); }
+                await _logSemaphore.WaitAsync(CancellationToken.None);
+                try { await _logWriter.FlushAsync(CancellationToken.None); } finally { _logSemaphore.Release(); }
             }
             catch { }
         }

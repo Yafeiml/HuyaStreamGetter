@@ -1,13 +1,16 @@
 {
   "CustomHost": "",
+  "AdminPasswordHash": "",
+  "PlaybackTokenHash": "",
+  "PlaybackTokenEncrypted": "",
   "StreamingMode": "AlwaysOn",
   "IdleTimeoutSeconds": 300,
   "StartupTimeoutSeconds": 30,
   "PrewarmEnabledChannels": [],
   "CookieProfiles": {
-    "huya_main": "（可选：在此粘贴虎牙网页版 Cookie，可直接获取最高原画/蓝光 4K 码率）",
-    "douyu_main": "（可选：在此粘贴斗鱼网页版 Cookie）",
-    "bilibili_main": "（可选：在此粘贴 B 站网页版 Cookie）"
+    "huya": "",
+    "douyu": "",
+    "bilibili": ""
   },
   "Channels": [
     {
@@ -16,7 +19,7 @@
       "Platform": "huya",
       "Url": "https://www.huya.com/eslcs",
       "Quality": "OD",
-      "CookieProfileKey": "huya_main",
+      "CookieProfileKey": "huya",
       "Enable": true
     },
     {
@@ -25,7 +28,7 @@
       "Platform": "douyu",
       "Url": "https://www.douyu.com/9999",
       "Quality": "OD",
-      "CookieProfileKey": "douyu_main",
+      "CookieProfileKey": "douyu",
       "Enable": true
     },
     {
@@ -34,7 +37,7 @@
       "Platform": "huya",
       "Url": "https://www.huya.com/660004",
       "Quality": "OD",
-      "CookieProfileKey": "huya_main",
+      "CookieProfileKey": "huya",
       "Enable": false
     }
   ]
