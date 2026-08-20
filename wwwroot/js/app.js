@@ -35,6 +35,10 @@ async function initApp() {
 
 function setupEventListeners() {
     document.getElementById('form-login')?.addEventListener('submit', loginAdmin);
+    document.getElementById('btn-toggle-login-password')?.addEventListener('click', () => {
+        const password = document.getElementById('login-password');
+        setLoginPasswordVisibility(password?.type === 'password');
+    });
     document.getElementById('btn-logout')?.addEventListener('click', logoutAdmin);
     document.getElementById('btn-playback-security')?.addEventListener('click', openPlaybackSecurityModal);
     document.getElementById('btn-copy-secure-m3u')?.addEventListener('click', () => {
@@ -149,7 +153,23 @@ function lockManagement(message = '') {
     if (loginError) loginError.innerText = message;
     const password = document.getElementById('login-password');
     if (password) password.value = '';
+    setLoginPasswordVisibility(false);
     window.setTimeout(() => password?.focus(), 50);
+}
+
+function setLoginPasswordVisibility(visible) {
+    const password = document.getElementById('login-password');
+    const toggle = document.getElementById('btn-toggle-login-password');
+    if (!password || !toggle) return;
+
+    password.type = visible ? 'text' : 'password';
+    toggle.setAttribute('aria-pressed', String(visible));
+    toggle.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+    toggle.title = visible ? '隐藏密码' : '显示密码';
+    password.focus({ preventScroll: true });
+
+    const cursorPosition = password.value.length;
+    password.setSelectionRange?.(cursorPosition, cursorPosition);
 }
 
 async function apiFetch(input, options = {}) {
