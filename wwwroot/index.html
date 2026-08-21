@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LiveStreamGateway - 全平台直播流聚合中继网关</title>
-    <link rel="stylesheet" href="css/style.css?v=1.5.6-r2">
+    <link rel="stylesheet" href="css/style.css?v=1.5.7-r1">
     <!-- Hls.js for live preview player -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
 </head>
@@ -91,7 +91,7 @@
                 <div class="brand-text">
                     <h1>
                         <a href="https://github.com/Yafeiml/LiveStreamGateway" target="_blank" rel="noopener noreferrer" class="brand-title-link" title="前往 GitHub 项目主页">LiveStreamGateway</a>
-                        <span class="version-tag" id="app-version">v1.5.6</span>
+                        <span class="version-tag" id="app-version">v1.5.7</span>
                     </h1>
                     <span class="sub-title">多平台直播中继与 IPTV 转换服务</span>
                 </div>
@@ -449,11 +449,19 @@
             </div>
             <div class="modal-body playback-security-body">
                 <p class="section-desc">
-                    播放令牌独立于网页登录会话，Jellyfin 不会因管理员退出或登录过期而断开。令牌具有 256 位随机熵，服务端仅保存摘要和管理员密码加密后的恢复密文。
+                    播放令牌独立于网页登录会话，Jellyfin 不会因管理员退出或登录过期而断开。新生成的令牌为纯 6 位数字，错误尝试会触发临时锁定；服务端仅保存摘要和管理员密码加密后的恢复密文。
                 </p>
+                <div class="playback-auth-setting">
+                    <label class="switch-label" for="playback-token-auth-enabled">
+                        <input type="checkbox" id="playback-token-auth-enabled" checked>
+                        <span class="switch-slider"></span>
+                        <span class="switch-text">启用播放令牌鉴权</span>
+                    </label>
+                    <p>关闭后 M3U、HLS 和分片地址不再携带或校验令牌，仅建议完全不对公网开放服务的用户使用。</p>
+                </div>
                 <div class="playback-token-status" id="playback-token-status">正在读取令牌状态...</div>
                 <div class="form-group">
-                    <label for="playback-m3u-url">当前受保护的 M3U 订阅地址</label>
+                    <label for="playback-m3u-url">当前 M3U 订阅地址</label>
                     <div class="secure-url-row">
                         <input type="text" id="playback-m3u-url" readonly placeholder="尚未生成播放令牌">
                         <button type="button" class="btn btn-secondary" id="btn-copy-secure-m3u">复制地址</button>
@@ -461,15 +469,15 @@
                 </div>
                 <form id="form-rotate-playback-token" class="token-rotation-form">
                     <div class="form-group">
-                        <label for="playback-token-current-password">输入管理员密码以轮换令牌</label>
+                        <label for="playback-token-current-password">输入管理员密码以轮换 6 位数字令牌</label>
                         <input type="password" id="playback-token-current-password" autocomplete="current-password" maxlength="256" required placeholder="当前管理员密码">
                     </div>
                     <div class="auth-error" id="playback-token-error" role="alert"></div>
                     <div class="token-warning">
-                        ⚠️ 轮换后旧 M3U、HLS 和分片地址立即失效，必须把新地址同步更新到 Jellyfin / IPTV 客户端。
+                        ⚠️ 启用鉴权时，轮换会使旧的带令牌 M3U、HLS 和分片地址立即失效；关闭鉴权时无令牌地址保持不变。
                     </div>
                     <div class="editor-actions">
-                        <button type="submit" class="btn btn-danger" id="btn-rotate-playback-token">轮换并作废旧地址</button>
+                        <button type="submit" class="btn btn-danger" id="btn-rotate-playback-token">轮换 6 位数字令牌</button>
                     </div>
                 </form>
             </div>
@@ -533,6 +541,6 @@
     <!-- Toast Notification -->
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="js/app.js?v=1.5.6-r2"></script>
+    <script src="js/app.js?v=1.5.7-r1"></script>
 </body>
 </html>

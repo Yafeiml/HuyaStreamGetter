@@ -48,9 +48,11 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddHostedService<RenderService>();
 builder.Services.AddHostedService<StreamManagerService>();
 builder.Services.AddSingleton<AdminAuthService>();
+builder.Services.AddSingleton<PlaybackTokenRateLimiter>();
 
 var app = builder.Build();
 var adminAuth = app.Services.GetRequiredService<AdminAuthService>();
+var playbackTokenRateLimiter = app.Services.GetRequiredService<PlaybackTokenRateLimiter>();
 
 // 管理 API 安全边界：播放链路及健康检查保持公开，其余 /api/* 必须持有登录会话。
 // SameSite=Strict 会话 Cookie 配合自定义请求头，阻断常见 CSRF 表单请求。
@@ -223,11 +225,16 @@ app.MapPost("/api/auth/setup", async (HttpContext context) =>
     string token = adminAuth.CreateSession(password);
     AdminAuthService.AppendSessionCookie(context.Response, token, context.Request.IsHttps);
     Console.WriteLine("[Security] 管理员密码与独立播放令牌已通过首次设置引导创建");
+    bool playbackTokenAuthEnabled;
+    lock (Globals.ConfigLock)
+        playbackTokenAuthEnabled = Globals.Config.PlaybackTokenAuthEnabled;
     return Results.Ok(new
     {
         success = true,
         playbackToken = playbackCredentials.Token,
-        m3uPath = $"/p/{playbackCredentials.Token}/jellyfin.m3u"
+        m3uPath = playbackTokenAuthEnabled
+            ? $"/p/{playbackCredentials.Token}.m3u"
+            : "/jellyfin.m3u"
     });
 });
 
@@ -318,13 +325,23 @@ app.MapPost("/api/playback-token/rotate", async (PlaybackTokenRotateRequest requ
         return Results.Json(new { error = "当前管理员密码错误" }, statusCode: StatusCodes.Status403Forbidden);
     }
 
-    PlaybackTokenCredentials credentials = PlaybackTokenProtector.Create(request.CurrentPassword);
     string oldHash;
     string oldEncrypted;
     lock (Globals.ConfigLock)
     {
         oldHash = Globals.Config.PlaybackTokenHash;
         oldEncrypted = Globals.Config.PlaybackTokenEncrypted;
+    }
+
+    PlaybackTokenCredentials credentials;
+    do
+    {
+        credentials = PlaybackTokenProtector.Create(request.CurrentPassword);
+    }
+    while (!string.IsNullOrWhiteSpace(oldHash) && PlaybackTokenProtector.ValidateToken(credentials.Token, oldHash));
+
+    lock (Globals.ConfigLock)
+    {
         Globals.Config.PlaybackTokenHash = credentials.Hash;
         Globals.Config.PlaybackTokenEncrypted = credentials.Encrypted;
     }
@@ -339,12 +356,44 @@ app.MapPost("/api/playback-token/rotate", async (PlaybackTokenRotateRequest requ
         return Results.Json(new { error = "播放令牌写入失败，旧令牌仍然有效" }, statusCode: StatusCodes.Status500InternalServerError);
     }
 
+    playbackTokenRateLimiter.ResetAll();
     adminAuth.InvalidateAllSessions();
     string sessionToken = adminAuth.CreateSession(request.CurrentPassword);
     AdminAuthService.AppendSessionCookie(context.Response, sessionToken, context.Request.IsHttps);
-    string m3uUrl = $"{ResolveEffectiveBaseUrl(context.Request)}/p/{credentials.Token}/jellyfin.m3u";
-    Console.WriteLine("[Security] 独立播放令牌已轮换，旧 M3U/HLS 地址立即失效");
+    bool playbackTokenAuthEnabled;
+    lock (Globals.ConfigLock)
+        playbackTokenAuthEnabled = Globals.Config.PlaybackTokenAuthEnabled;
+    string m3uUrl = playbackTokenAuthEnabled
+        ? $"{ResolveEffectiveBaseUrl(context.Request)}/p/{credentials.Token}.m3u"
+        : $"{ResolveEffectiveBaseUrl(context.Request)}/jellyfin.m3u";
+    Console.WriteLine(playbackTokenAuthEnabled
+        ? "[Security] 独立播放令牌已轮换，旧 M3U/HLS 地址立即失效"
+        : "[Security] 独立播放令牌已轮换，当前无令牌播放地址保持不变");
     return Results.Ok(new { success = true, playbackToken = credentials.Token, m3uUrl });
+});
+
+app.MapPost("/api/playback-token/auth", async (PlaybackTokenAuthRequest request) =>
+{
+    bool oldValue;
+    lock (Globals.ConfigLock)
+    {
+        if (request.Enabled && string.IsNullOrWhiteSpace(Globals.Config.PlaybackTokenHash))
+            return Results.Conflict(new { error = "尚未生成播放令牌，请先轮换生成 6 位数字令牌" });
+
+        oldValue = Globals.Config.PlaybackTokenAuthEnabled;
+        Globals.Config.PlaybackTokenAuthEnabled = request.Enabled;
+    }
+
+    if (!await SaveConfigAsync())
+    {
+        lock (Globals.ConfigLock)
+            Globals.Config.PlaybackTokenAuthEnabled = oldValue;
+        return Results.Json(new { error = "播放令牌鉴权设置写入失败" }, statusCode: StatusCodes.Status500InternalServerError);
+    }
+
+    playbackTokenRateLimiter.ResetAll();
+    Console.WriteLine($"[Security] 播放令牌鉴权已{(request.Enabled ? "启用" : "关闭")}");
+    return Results.Ok(new { success = true, enabled = request.Enabled });
 });
 
 // -------------------------------------------------------------
@@ -536,10 +585,20 @@ app.MapGet("/api/status", (HttpRequest request) =>
     var uptime = DateTime.UtcNow - Globals.StartTimeUtc;
     var channelStatusList = new List<object>();
     bool playbackTokenAvailable = adminAuth.TryGetPlaybackToken(request, out string playbackToken);
-    string playbackPrefix = playbackTokenAvailable ? $"/p/{Uri.EscapeDataString(playbackToken)}" : "";
+    bool playbackTokenAuthEnabled;
     bool playbackTokenConfigured;
     lock (Globals.ConfigLock)
+    {
+        playbackTokenAuthEnabled = Globals.Config.PlaybackTokenAuthEnabled;
         playbackTokenConfigured = !string.IsNullOrWhiteSpace(Globals.Config.PlaybackTokenHash);
+    }
+    bool playbackAccessAvailable = !playbackTokenAuthEnabled || playbackTokenAvailable;
+    string playbackPrefix = playbackTokenAuthEnabled && playbackTokenAvailable
+        ? $"/p/{Uri.EscapeDataString(playbackToken)}"
+        : "";
+    string playbackM3uPath = playbackTokenAuthEnabled && playbackTokenAvailable
+        ? $"{playbackPrefix}.m3u"
+        : "/jellyfin.m3u";
 
     string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
     string displayHost = "";
@@ -588,8 +647,8 @@ app.MapGet("/api/status", (HttpRequest request) =>
                 isCookieNetworkError = cookieStatus?.IsNetworkError ?? false,
                 cookieUsername = cookieStatus?.Username ?? "",
                 cookieStatusMessage = cookieStatus?.Message ?? "",
-                hlsUrl = playbackTokenAvailable ? $"{playbackPrefix}/live/{channel.Id}/stream.m3u8" : (string?)null,
-                fullHlsUrl = playbackTokenAvailable ? $"{effectiveBaseUrl}{playbackPrefix}/live/{channel.Id}/stream.m3u8" : (string?)null
+                hlsUrl = playbackAccessAvailable ? $"{playbackPrefix}/live/{channel.Id}/stream.m3u8" : (string?)null,
+                fullHlsUrl = playbackAccessAvailable ? $"{effectiveBaseUrl}{playbackPrefix}/live/{channel.Id}/stream.m3u8" : (string?)null
             });
         }
     }
@@ -604,7 +663,8 @@ app.MapGet("/api/status", (HttpRequest request) =>
         httpPort = request.Host.Port ?? Globals.HTTP_PORT,
         displayHost = displayHost,
         customHost = Globals.Config.CustomHost ?? "",
-        m3uUrl = playbackTokenAvailable ? $"{effectiveBaseUrl}{playbackPrefix}/jellyfin.m3u" : (string?)null,
+        m3uUrl = playbackAccessAvailable ? $"{effectiveBaseUrl}{playbackM3uPath}" : (string?)null,
+        playbackTokenAuthEnabled,
         playbackTokenConfigured,
         playbackTokenAvailable,
         uptimeSeconds = (int)uptime.TotalSeconds,
@@ -641,6 +701,7 @@ app.MapGet("/api/config", () =>
         return Results.Json(new
         {
             customHost = Globals.Config.CustomHost ?? "",
+            playbackTokenAuthEnabled = Globals.Config.PlaybackTokenAuthEnabled,
             channels = safeChannels,
             cookieConfigured,
             cookieStatuses = Globals.PlatformCookieStatuses
@@ -890,26 +951,31 @@ app.MapPost("/api/config/host", async (JsonNode body) =>
     return Results.Ok(new { success = true, customHost = host });
 });
 
-// 独立播放令牌不依赖网页登录会话；随机路径适配 Jellyfin/IPTV 长期远程拉取。
-app.MapGet("/p/{playbackToken}/jellyfin.m3u", (string playbackToken, HttpRequest request, HttpResponse response) =>
+// 播放令牌独立于网页登录会话；新标准地址缩短为 /p/{6位令牌}.m3u。
+IResult ServeProtectedM3u(string playbackToken, HttpContext context)
 {
-    if (!IsPlaybackTokenValid(playbackToken)) return Results.NotFound();
-    SetNoStoreHeaders(response);
-    string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
+    IResult? rejection = GetPlaybackTokenRejection(playbackToken, context, playbackTokenRateLimiter);
+    if (rejection != null) return rejection;
     string playbackPrefix = $"/p/{Uri.EscapeDataString(playbackToken)}";
+    return BuildM3uResponse(context.Request, context.Response, playbackPrefix);
+}
 
-    var m3uContent = new StringBuilder("#EXTM3U\n");
-    lock (Globals.ConfigLock)
-    {
-        foreach (var channel in Globals.Config.Channels)
-        {
-            if (!channel.Enable) continue;
-            m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\" group-title=\"{channel.Platform}\",{channel.Name}");
-            m3uContent.AppendLine($"{effectiveBaseUrl}{playbackPrefix}/live/{channel.Id}/stream.m3u8");
-        }
-    }
-    
-    return Results.Content(m3uContent.ToString(), "application/x-mpegURL");
+app.MapGet("/p/{playbackToken}.m3u", (string playbackToken, HttpContext context) =>
+{
+    return ServeProtectedM3u(playbackToken, context);
+});
+
+// 保留旧订阅路径，避免已配置的 Jellyfin/IPTV 客户端在升级后断流。
+app.MapGet("/p/{playbackToken}/jellyfin.m3u", (string playbackToken, HttpContext context) =>
+{
+    return ServeProtectedM3u(playbackToken, context);
+});
+
+// 仅在管理员关闭令牌鉴权后开放无令牌播放地址。
+app.MapGet("/jellyfin.m3u", (HttpContext context) =>
+{
+    if (IsPlaybackTokenAuthEnabled()) return Results.NotFound();
+    return BuildM3uResponse(context.Request, context.Response, "");
 });
 
 // 代理并动态重新签名虎牙 HLS 播放列表的端点。由本地 FFmpeg 调用，防止 wsSecret/wsTime 签名过期返回 403。
@@ -1008,10 +1074,9 @@ app.MapGet("/huya-source/{channelId}/stream.m3u8", async (string channelId, Http
 
 // 动态 m3u8 代理端点：读取 FFmpeg 生成的 stream.m3u8，剥除 #EXT-X-ENDLIST 标记
 // OnDemand 模式：首次请求触发 FFmpeg 启动；后续请求更新最后访问时间，超时则自动停流
-app.MapGet("/p/{playbackToken}/live/{channelId}/stream.m3u8", async (string playbackToken, string channelId, HttpContext ctx) =>
+async Task<IResult> ServeHlsManifest(string channelId, HttpContext ctx)
 {
     SetNoStoreHeaders(ctx.Response);
-    if (!IsPlaybackTokenValid(playbackToken)) return Results.NotFound();
     string m3u8Path = Path.Combine(Globals.HLS_FULL_PATH, channelId, "stream.m3u8");
 
     // 检查频道是否存在且已启用
@@ -1078,14 +1143,25 @@ app.MapGet("/p/{playbackToken}/live/{channelId}/stream.m3u8", async (string play
         ctx.Response.Headers["Retry-After"] = "1";
         return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
+}
+
+app.MapGet("/p/{playbackToken}/live/{channelId}/stream.m3u8", async (string playbackToken, string channelId, HttpContext ctx) =>
+{
+    IResult? rejection = GetPlaybackTokenRejection(playbackToken, ctx, playbackTokenRateLimiter);
+    return rejection ?? await ServeHlsManifest(channelId, ctx);
 });
 
-// .ts 分片通过同一受保护路径返回；m3u8 中的相对引用会自然继承 token 路径。
-app.MapGet("/p/{playbackToken}/live/{channelId}/{fileName}.ts", (string playbackToken, string channelId, string fileName, HttpContext ctx) =>
+app.MapGet("/live/{channelId}/stream.m3u8", async (string channelId, HttpContext ctx) =>
+{
+    if (IsPlaybackTokenAuthEnabled()) return Results.NotFound();
+    return await ServeHlsManifest(channelId, ctx);
+});
+
+// .ts 分片沿用 M3U/HLS 的同一鉴权模式。
+IResult ServeHlsSegment(string channelId, string fileName, HttpContext ctx)
 {
     SetNoStoreHeaders(ctx.Response);
-    if (!IsPlaybackTokenValid(playbackToken) ||
-        string.IsNullOrWhiteSpace(fileName) ||
+    if (string.IsNullOrWhiteSpace(fileName) ||
         fileName.Contains("..", StringComparison.Ordinal) ||
         !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
     {
@@ -1103,6 +1179,18 @@ app.MapGet("/p/{playbackToken}/live/{channelId}/{fileName}.ts", (string playback
         return Results.NotFound();
     }
     return Results.File(tsPath, "video/mp2t");
+}
+
+app.MapGet("/p/{playbackToken}/live/{channelId}/{fileName}.ts", (string playbackToken, string channelId, string fileName, HttpContext ctx) =>
+{
+    IResult? rejection = GetPlaybackTokenRejection(playbackToken, ctx, playbackTokenRateLimiter);
+    return rejection ?? ServeHlsSegment(channelId, fileName, ctx);
+});
+
+app.MapGet("/live/{channelId}/{fileName}.ts", (string channelId, string fileName, HttpContext ctx) =>
+{
+    if (IsPlaybackTokenAuthEnabled()) return Results.NotFound();
+    return ServeHlsSegment(channelId, fileName, ctx);
 });
 
 // GET /api/metrics - 每频道运行指标（无敏感数据）
@@ -1485,12 +1573,55 @@ static void SetNoStoreHeaders(HttpResponse response)
     response.Headers["Expires"] = "0";
 }
 
-static bool IsPlaybackTokenValid(string? token)
+static IResult BuildM3uResponse(HttpRequest request, HttpResponse response, string playbackPrefix)
 {
+    SetNoStoreHeaders(response);
+    string effectiveBaseUrl = ResolveEffectiveBaseUrl(request);
+    var m3uContent = new StringBuilder("#EXTM3U\n");
+
+    lock (Globals.ConfigLock)
+    {
+        foreach (var channel in Globals.Config.Channels)
+        {
+            if (!channel.Enable) continue;
+            m3uContent.AppendLine($"#EXTINF:-1 tvg-name=\"{channel.Name}\" tvg-id=\"{channel.Id}\" group-title=\"{channel.Platform}\",{channel.Name}");
+            m3uContent.AppendLine($"{effectiveBaseUrl}{playbackPrefix}/live/{channel.Id}/stream.m3u8");
+        }
+    }
+
+    return Results.Content(m3uContent.ToString(), "application/x-mpegURL");
+}
+
+static bool IsPlaybackTokenAuthEnabled()
+{
+    lock (Globals.ConfigLock)
+        return Globals.Config.PlaybackTokenAuthEnabled;
+}
+
+static IResult? GetPlaybackTokenRejection(
+    string? token,
+    HttpContext context,
+    PlaybackTokenRateLimiter rateLimiter)
+{
+    if (!IsPlaybackTokenAuthEnabled()) return null;
+
     string tokenHash;
     lock (Globals.ConfigLock)
         tokenHash = Globals.Config.PlaybackTokenHash ?? "";
-    return PlaybackTokenProtector.ValidateToken(token, tokenHash);
+
+    string clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    bool valid = rateLimiter.TryValidate(token, tokenHash, clientKey, out bool rateLimited, out TimeSpan retryAfter);
+    if (valid) return null;
+
+    SetNoStoreHeaders(context.Response);
+    if (rateLimited)
+    {
+        int seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+        context.Response.Headers["Retry-After"] = seconds.ToString();
+        return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+    }
+
+    return Results.NotFound();
 }
 
 static bool IsFreshNonEmptyFile(string path, TimeSpan maxAge)
@@ -1636,6 +1767,8 @@ public class AppConfig
     public string PlaybackTokenHash { get; set; } = "";
     /// <summary>播放令牌的 AES-256-GCM 密文，仅用于登录后恢复订阅地址；原文不落盘。</summary>
     public string PlaybackTokenEncrypted { get; set; } = "";
+    /// <summary>是否要求 M3U、HLS 与分片路径携带播放令牌；旧配置缺省为启用。</summary>
+    public bool PlaybackTokenAuthEnabled { get; set; } = true;
     /// <summary>推流模式：AlwaysOn（始终推流，默认）或 OnDemand（按需推流，无人观看时停止 FFmpeg）</summary>
     public string StreamingMode { get; set; } = "AlwaysOn";
     /// <summary>OnDemand 模式：最后一次 m3u8 请求后多久无新请求则停止 FFmpeg（秒），默认 300 秒</summary>
@@ -1704,7 +1837,7 @@ public class ChannelMetrics
 
 public static class Globals
 {
-    public const string APP_VERSION = "v1.5.6";
+    public const string APP_VERSION = "v1.5.7";
     public const int HTTP_PORT = 9898;
     public const string HLS_DIR = "hls_stream";
     public const int HLS_MANIFEST_FRESH_SECONDS = 30;

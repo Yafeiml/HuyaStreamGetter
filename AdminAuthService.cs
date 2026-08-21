@@ -284,3 +284,8 @@ public sealed class PlaybackTokenRotateRequest
 {
     public string CurrentPassword { get; set; } = "";
 }
+
+public sealed class PlaybackTokenAuthRequest
+{
+    public bool Enabled { get; set; } = true;
+}

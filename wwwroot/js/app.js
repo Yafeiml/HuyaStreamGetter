@@ -48,8 +48,9 @@ function setupEventListeners() {
     document.getElementById('btn-playback-security')?.addEventListener('click', openPlaybackSecurityModal);
     document.getElementById('btn-copy-secure-m3u')?.addEventListener('click', () => {
         const url = document.getElementById('playback-m3u-url')?.value || '';
-        if (url) copyTextToClipboard(url, '受保护的 M3U 地址', document.getElementById('btn-copy-secure-m3u'));
+        if (url) copyTextToClipboard(url, 'M3U 地址', document.getElementById('btn-copy-secure-m3u'));
     });
+    document.getElementById('playback-token-auth-enabled')?.addEventListener('change', updatePlaybackTokenAuthentication);
     document.getElementById('form-rotate-playback-token')?.addEventListener('submit', rotatePlaybackToken);
     document.getElementById('btn-change-password')?.addEventListener('click', () => {
         document.getElementById('form-change-password')?.reset();
@@ -424,23 +425,74 @@ function openPlaybackSecurityModal() {
 
 function renderPlaybackSecurityState() {
     const url = appState.status?.m3uUrl || '';
+    const authEnabled = appState.status?.playbackTokenAuthEnabled !== false;
     const configured = appState.status?.playbackTokenConfigured === true;
     const available = appState.status?.playbackTokenAvailable === true && Boolean(url);
+    const accessAvailable = Boolean(url) && (!authEnabled || available);
     const input = document.getElementById('playback-m3u-url');
     const copyButton = document.getElementById('btn-copy-secure-m3u');
     const status = document.getElementById('playback-token-status');
+    const toggle = document.getElementById('playback-token-auth-enabled');
 
-    if (input) input.value = available ? url : '';
-    if (copyButton) copyButton.disabled = !available;
+    if (toggle && !toggle.disabled) toggle.checked = authEnabled;
+    if (input) input.value = accessAvailable ? url : '';
+    if (copyButton) copyButton.disabled = !accessAvailable;
     if (status) {
-        status.className = `playback-token-status${available ? '' : ' missing'}`;
-        if (available) {
-            status.innerText = '✅ 独立播放令牌已启用；网页登录退出或过期不会影响此订阅地址。';
+        status.className = `playback-token-status${authEnabled && available ? '' : ' missing'}`;
+        if (!authEnabled) {
+            status.innerText = '⚠️ 播放令牌鉴权已关闭；任何能够访问本服务的设备都可以读取并播放频道。';
+        } else if (available) {
+            status.innerText = '✅ 播放令牌鉴权已启用；新轮换令牌为纯 6 位数字，网页登录退出或过期不会影响播放。';
         } else if (configured) {
             status.innerText = '⚠️ 播放令牌已配置，但当前会话无法解密恢复地址；请轮换令牌。';
         } else {
-            status.innerText = '⚠️ 尚未配置播放令牌，请先轮换生成一个新地址。';
+            status.innerText = '⚠️ 尚未配置播放令牌，请先轮换生成 6 位数字令牌。';
         }
+    }
+}
+
+async function updatePlaybackTokenAuthentication(event) {
+    const toggle = event.currentTarget;
+    const enabled = toggle.checked;
+    const error = document.getElementById('playback-token-error');
+    if (error) error.innerText = '';
+
+    if (!enabled) {
+        const confirmed = await showConfirm({
+            title: '关闭播放令牌鉴权',
+            message: '关闭后，任何能够访问本服务地址的设备都可以获取 M3U、HLS 和分片。确认仅在可信局域网中使用并继续吗？',
+            okText: '确认关闭',
+            cancelText: '保持启用',
+            type: 'danger'
+        });
+        if (!confirmed) {
+            toggle.checked = true;
+            return;
+        }
+    }
+
+    toggle.disabled = true;
+    try {
+        const res = await apiFetch('/api/playback-token/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            toggle.checked = !enabled;
+            if (error) error.innerText = data.error || '播放令牌鉴权设置失败';
+            return;
+        }
+
+        await loadStatus(false);
+        showToast(enabled ? '播放令牌鉴权已启用' : '播放令牌鉴权已关闭', enabled ? 'success' : 'warning');
+    } catch (err) {
+        toggle.checked = !enabled;
+        if (error) error.innerText = `请求失败：${err.message}`;
+    } finally {
+        toggle.disabled = false;
+        renderPlaybackSecurityState();
     }
 }
 
@@ -451,9 +503,12 @@ async function rotatePlaybackToken(event) {
     const button = document.getElementById('btn-rotate-playback-token');
     if (error) error.innerText = '';
 
+    const authEnabled = appState.status?.playbackTokenAuthEnabled !== false;
     const confirmed = await showConfirm({
-        title: '轮换独立播放令牌',
-        message: '旧 M3U 与全部 HLS 地址会立即失效。确认已准备好把新地址更新到 Jellyfin / IPTV 客户端吗？',
+        title: '轮换 6 位数字令牌',
+        message: authEnabled
+            ? '旧的带令牌 M3U 与全部 HLS 地址会立即失效。确认已准备好把新地址更新到 Jellyfin / IPTV 客户端吗？'
+            : '将生成新的 6 位数字令牌；当前无令牌地址保持不变，重新启用鉴权后需要使用新地址。确认继续吗？',
         okText: '确认轮换',
         cancelText: '暂不轮换',
         type: 'danger'
@@ -481,13 +536,13 @@ async function rotatePlaybackToken(event) {
             document.getElementById('playback-token-current-password').value = '';
         await loadStatus(false);
         renderPlaybackSecurityState();
-        showToast('播放令牌已轮换，请立即更新 Jellyfin / IPTV 订阅地址', 'success');
+        showToast(authEnabled ? '6 位数字令牌已轮换，请更新客户端地址' : '6 位数字令牌已轮换', 'success');
     } catch (err) {
         if (error) error.innerText = `请求失败：${err.message}`;
     } finally {
         if (button) {
             button.disabled = false;
-            button.innerText = '轮换并作废旧地址';
+            button.innerText = '轮换 6 位数字令牌';
         }
     }
 }

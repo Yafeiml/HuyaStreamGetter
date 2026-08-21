@@ -3,6 +3,7 @@
   "AdminPasswordHash": "",
   "PlaybackTokenHash": "",
   "PlaybackTokenEncrypted": "",
+  "PlaybackTokenAuthEnabled": true,
   "StreamingMode": "AlwaysOn",
   "IdleTimeoutSeconds": 300,
   "StartupTimeoutSeconds": 30,

@@ -48,7 +48,7 @@ echo.
 echo ===================================================
 echo   🎉 LiveStreamGateway 已成功升级到最新版本！
 echo   管理看板地址: http://localhost:9898
-echo   M3U 订阅源:   http://localhost:9898/jellyfin.m3u
+echo   M3U 订阅源:   请登录管理面板复制当前地址
 echo ===================================================
 echo.
 pause

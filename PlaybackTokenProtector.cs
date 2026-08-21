@@ -1,10 +1,11 @@
 #nullable enable
 
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
 /// <summary>
-/// 为 Jellyfin/IPTV 生成不可猜测的独立播放令牌。
+/// 为 Jellyfin/IPTV 生成独立的 6 位数字播放令牌，并兼容升级前的长令牌。
 /// 路由校验只使用 SHA-256 摘要；为便于已登录管理员再次复制订阅地址，
 /// 令牌原文另以管理员密码派生密钥进行 AES-256-GCM 加密，绝不明文落盘。
 /// </summary>
@@ -19,7 +20,8 @@ public static class PlaybackTokenProtector
 
     public static PlaybackTokenCredentials Create(string adminPassword)
     {
-        string token = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        string token = RandomNumberGenerator.GetInt32(0, 1_000_000)
+            .ToString("D6", CultureInfo.InvariantCulture);
         return new PlaybackTokenCredentials(
             token,
             HashToken(token),
@@ -31,8 +33,9 @@ public static class PlaybackTokenProtector
 
     public static bool ValidateToken(string? token, string? encodedHash)
     {
-        if (string.IsNullOrWhiteSpace(token) || token.Length > 128 || string.IsNullOrWhiteSpace(encodedHash))
+        if (!IsSupportedTokenFormat(token) || string.IsNullOrWhiteSpace(encodedHash))
             return false;
+        string validatedToken = token!;
 
         try
         {
@@ -40,7 +43,7 @@ public static class PlaybackTokenProtector
             if (parts.Length != 2 || !parts[0].Equals("sha256", StringComparison.Ordinal))
                 return false;
             byte[] expected = Convert.FromBase64String(parts[1]);
-            byte[] actual = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+            byte[] actual = SHA256.HashData(Encoding.UTF8.GetBytes(validatedToken));
             return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(actual, expected);
         }
         catch
@@ -94,7 +97,7 @@ public static class PlaybackTokenProtector
             byte[] nonce = Convert.FromBase64String(parts[3]);
             byte[] ciphertext = Convert.FromBase64String(parts[4]);
             byte[] tag = Convert.FromBase64String(parts[5]);
-            if (salt.Length < SaltBytes || nonce.Length != NonceBytes || tag.Length != TagBytes || ciphertext.Length is < 32 or > 256)
+            if (salt.Length < SaltBytes || nonce.Length != NonceBytes || tag.Length != TagBytes || ciphertext.Length is < 6 or > 256)
                 return false;
 
             key = Rfc2898DeriveBytes.Pbkdf2(
@@ -107,7 +110,7 @@ public static class PlaybackTokenProtector
             using var aes = new AesGcm(key, TagBytes);
             aes.Decrypt(nonce, ciphertext, tag, plaintext, AssociatedData);
             token = Encoding.UTF8.GetString(plaintext);
-            return token.Length is >= 32 and <= 128;
+            return IsSupportedTokenFormat(token);
         }
         catch
         {
@@ -121,8 +124,30 @@ public static class PlaybackTokenProtector
         }
     }
 
-    private static string Base64UrlEncode(byte[] bytes) =>
-        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    public static bool IsSupportedTokenFormat(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return false;
+
+        if (token.Length == 6)
+        {
+            foreach (char character in token)
+            {
+                if (character is < '0' or > '9') return false;
+            }
+            return true;
+        }
+
+        // 兼容升级前生成的 Base64URL 长令牌；现有地址在主动轮换前继续有效。
+        if (token.Length is < 32 or > 128) return false;
+        foreach (char character in token)
+        {
+            bool allowed = character is >= 'a' and <= 'z' or
+                           >= 'A' and <= 'Z' or
+                           >= '0' and <= '9' or '-' or '_';
+            if (!allowed) return false;
+        }
+        return true;
+    }
 }
 
 public sealed record PlaybackTokenCredentials(string Token, string Hash, string Encrypted);
