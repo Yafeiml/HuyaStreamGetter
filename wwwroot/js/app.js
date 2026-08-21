@@ -21,7 +21,6 @@ let appState = {
     urlDebounceTimer: null,
     authenticated: false,
     setupRequired: false,
-    setupCodeRequired: false,
     managementStarted: false,
     handlingUnauthorized: false
 };
@@ -119,7 +118,7 @@ async function initializeAuthentication() {
 
         lockManagement();
     } catch (err) {
-        setAuthenticationMode({ setupRequired: false, setupCodeRequired: false });
+        setAuthenticationMode({ setupRequired: false });
         lockManagement(`无法连接管理服务：${err.message}`);
     }
 }
@@ -159,28 +158,21 @@ function lockManagement(message = '') {
     if (password) password.value = '';
     const confirmPassword = document.getElementById('auth-confirm-password');
     if (confirmPassword) confirmPassword.value = '';
-    const setupCode = document.getElementById('auth-setup-code');
-    if (setupCode) setupCode.value = '';
     setPasswordVisibility('login-password', 'btn-toggle-login-password', false, false);
     setPasswordVisibility('auth-confirm-password', 'btn-toggle-confirm-password', false, false);
     setAuthSubmitIdleState();
-    const focusTarget = appState.setupRequired && appState.setupCodeRequired ? setupCode : password;
-    window.setTimeout(() => focusTarget?.focus(), 50);
+    window.setTimeout(() => password?.focus(), 50);
 }
 
 function setAuthenticationMode(session) {
     const setupRequired = session?.setupRequired === true;
-    const setupCodeRequired = setupRequired && session?.setupCodeRequired === true;
     appState.setupRequired = setupRequired;
-    appState.setupCodeRequired = setupCodeRequired;
 
     const card = document.querySelector('.auth-card');
     const form = document.getElementById('form-login');
     const subtitle = document.getElementById('auth-subtitle');
     const setupMessage = document.getElementById('auth-setup-message');
     const setupMessageDetail = document.getElementById('auth-setup-message-detail');
-    const setupCodeGroup = document.getElementById('auth-setup-code-group');
-    const setupCode = document.getElementById('auth-setup-code');
     const password = document.getElementById('login-password');
     const confirmGroup = document.getElementById('auth-confirm-password-group');
     const confirmPassword = document.getElementById('auth-confirm-password');
@@ -191,15 +183,7 @@ function setAuthenticationMode(session) {
     if (subtitle) subtitle.innerText = setupRequired ? '首次使用 · 创建管理员密码' : '登录管理控制台';
     if (setupMessage) setupMessage.hidden = !setupRequired;
     if (setupMessageDetail) {
-        setupMessageDetail.innerText = setupCodeRequired
-            ? '为防止局域网内其他设备抢先接管，请先从本次启动的服务日志中复制一次性初始化码。'
-            : '检测到尚未创建管理员密码。完成设置后将自动登录，并生成独立的 Jellyfin / IPTV 播放令牌。';
-    }
-
-    if (setupCodeGroup) setupCodeGroup.hidden = !setupCodeRequired;
-    if (setupCode) {
-        setupCode.disabled = !setupCodeRequired;
-        setupCode.required = setupCodeRequired;
+        setupMessageDetail.innerText = '检测到尚未创建管理员密码。完成设置后将自动登录，并生成独立的 Jellyfin / IPTV 播放令牌。';
     }
     if (confirmGroup) confirmGroup.hidden = !setupRequired;
     if (confirmPassword) {
@@ -215,7 +199,6 @@ function setAuthenticationMode(session) {
         else password.removeAttribute('minlength');
     }
 
-    if (setupCode) setupCode.value = '';
     if (password) password.value = '';
     if (confirmPassword) confirmPassword.value = '';
     setPasswordVisibility('login-password', 'btn-toggle-login-password', false, false);
@@ -275,21 +258,14 @@ async function submitAuthentication(event) {
 }
 
 async function setupAdministrator() {
-    const setupCodeInput = document.getElementById('auth-setup-code');
     const passwordInput = document.getElementById('login-password');
     const confirmPasswordInput = document.getElementById('auth-confirm-password');
     const button = document.getElementById('btn-login');
     const error = document.getElementById('login-error');
-    const setupCode = setupCodeInput?.value.trim() || '';
     const password = passwordInput?.value || '';
     const confirmedPassword = confirmPasswordInput?.value || '';
 
     if (error) error.innerText = '';
-    if (appState.setupCodeRequired && !setupCode) {
-        if (error) error.innerText = '请输入本次启动日志中的一次性初始化码';
-        setupCodeInput?.focus();
-        return;
-    }
     if (password.length < 12) {
         if (error) error.innerText = '管理员密码至少需要 12 个字符';
         passwordInput?.focus();
@@ -315,7 +291,7 @@ async function setupAdministrator() {
             },
             credentials: 'same-origin',
             cache: 'no-store',
-            body: JSON.stringify({ password, setupCode })
+            body: JSON.stringify({ password })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -329,10 +305,9 @@ async function setupAdministrator() {
             return;
         }
 
-        if (setupCodeInput) setupCodeInput.value = '';
         if (passwordInput) passwordInput.value = '';
         if (confirmPasswordInput) confirmPasswordInput.value = '';
-        setAuthenticationMode({ setupRequired: false, setupCodeRequired: false });
+        setAuthenticationMode({ setupRequired: false });
         unlockManagement();
         await startManagementApp();
         showToast('管理员密码已创建，已安全进入控制台', 'success');

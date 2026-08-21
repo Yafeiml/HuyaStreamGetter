@@ -121,7 +121,6 @@ app.MapGet("/api/auth/session", (HttpContext context) =>
     {
         authenticated,
         setupRequired,
-        setupCodeRequired = setupRequired && !AdminAuthService.CanSetupWithoutCode(context),
         sessionLifetimeSeconds = (int)AdminAuthService.SessionLifetime.TotalSeconds,
         secureTransport = context.Request.IsHttps
     });
@@ -161,7 +160,7 @@ app.MapPost("/api/auth/logout", (HttpContext context) =>
     return Results.Ok(new { success = true });
 });
 
-// 首次安装引导：本机直连可直接设置；Docker/NAS/反代访问需提供启动日志中的一次性验证码。
+// 首次安装引导：尚未配置密码时可直接由 Web 面板创建；专用请求头用于阻止普通跨站表单误触发。
 app.MapPost("/api/auth/setup", async (HttpContext context) =>
 {
     if (adminAuth.IsPasswordConfigured)
@@ -194,28 +193,6 @@ app.MapPost("/api/auth/setup", async (HttpContext context) =>
         setupRequest.Password = (await reader.ReadToEndAsync()).TrimEnd('\r', '\n');
     }
 
-    if (!AdminAuthService.CanSetupWithoutCode(context))
-    {
-        string clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        bool validCode = adminAuth.TryValidateSetupCode(setupRequest.SetupCode, clientKey, out bool rateLimited, out TimeSpan retryAfter);
-        if (!validCode)
-        {
-            if (rateLimited)
-            {
-                int seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
-                context.Response.Headers["Retry-After"] = seconds.ToString();
-                Console.WriteLine($"[Security] 首次设置验证码触发限速，来源={clientKey}，等待={seconds}s");
-                return Results.Json(
-                    new { error = $"初始化码尝试过于频繁，请在 {seconds} 秒后重试", retryAfterSeconds = seconds },
-                    statusCode: StatusCodes.Status429TooManyRequests);
-            }
-
-            return Results.Json(
-                new { error = "一次性初始化码无效，请查看本次启动的最新服务日志" },
-                statusCode: StatusCodes.Status403Forbidden);
-        }
-    }
-
     string password = setupRequest.Password;
     string? passwordError = AdminAuthService.ValidateNewPassword(password);
     if (passwordError != null)
@@ -242,11 +219,10 @@ app.MapPost("/api/auth/setup", async (HttpContext context) =>
         return Results.Json(new { error = "密码配置写入失败" }, statusCode: StatusCodes.Status500InternalServerError);
     }
 
-    adminAuth.CompleteInitialSetup();
     adminAuth.InvalidateAllSessions();
     string token = adminAuth.CreateSession(password);
     AdminAuthService.AppendSessionCookie(context.Response, token, context.Request.IsHttps);
-    Console.WriteLine("[Security] 管理员密码与独立播放令牌已通过首次设置引导创建，一次性初始化码已作废");
+    Console.WriteLine("[Security] 管理员密码与独立播放令牌已通过首次设置引导创建");
     return Results.Ok(new
     {
         success = true,

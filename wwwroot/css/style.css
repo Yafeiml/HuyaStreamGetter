@@ -1420,12 +1420,6 @@ input[type="search"]:-webkit-autofill {
     gap: 12px;
 }
 
-.auth-setup-code-group {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-}
-
 .auth-password-field {
     position: relative;
     display: flex;
@@ -1493,22 +1487,10 @@ input[type="search"]:-webkit-autofill {
     opacity: 1;
 }
 
-.auth-setup-code-field input {
-    padding-right: 16px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-.auth-field-hint,
 .auth-password-hint {
     color: var(--text-muted);
     font-size: 11px;
     line-height: 1.55;
-}
-
-.auth-field-hint {
-    padding: 0 3px;
 }
 
 .auth-password-hint {
